@@ -1,0 +1,84 @@
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Byte-compiled / optimized / DLL files
+*.so
+*.dylib
+*.dll
+
+# Distribution / packaging
+build/
+dist/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# Virtual environments
+venv/
+.env/
+env/
+ENV/
+.venv/
+.ENV/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Test / coverage / profiling
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+.prof
+
+# IDEs / editors
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Jupyter
+.ipynb_checkpoints
+
+# Data, models, logs and outputs (common for ML projects)
+data/
+datasets/
+models/
+weights/
+logs/
+tensorboard/
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+
+# Secrets / credentials / env files
+.env
+.env.* 
+*.key
+*.pem
+credentials.json
+secrets.json
+secrets/
+
+# Database / local files
+*.sqlite3
+*.db
+
+# Misc
+*.log
+npm-debug.log
+node_modules/
