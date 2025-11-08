@@ -1,0 +1,138 @@
+hydra:
+  run:
+    dir: ${root_dir}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  hydra_logging:
+    version: 1
+    formatters:
+      simple:
+        format: '[%(asctime)s][HYDRA] %(message)s'
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: simple
+        stream: ext://sys.stdout
+    root:
+      level: INFO
+      handlers:
+      - console
+    loggers:
+      logging_example:
+        level: DEBUG
+    disable_existing_loggers: false
+  job_logging:
+    version: 1
+    formatters:
+      simple:
+        format: '[%(asctime)s][%(name)s][%(levelname)s] - %(message)s'
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: simple
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        formatter: simple
+        filename: ${hydra.job.name}.log
+    root:
+      level: INFO
+      handlers:
+      - console
+      - file
+    disable_existing_loggers: false
+  sweeper:
+    _target_: hydra._internal.core_plugins.basic_sweeper.BasicSweeper
+    max_batch_size: null
+  launcher:
+    _target_: hydra._internal.core_plugins.basic_launcher.BasicLauncher
+  help:
+    app_name: ${hydra.job.name}
+    header: '${hydra.help.app_name} is powered by Hydra.
+
+      '
+    footer: 'Powered by Hydra (https://hydra.cc)
+
+      Use --hydra-help to view Hydra specific help
+
+      '
+    template: '${hydra.help.header}
+
+      == Configuration groups ==
+
+      Compose your configuration from those groups (group=option)
+
+
+      $APP_CONFIG_GROUPS
+
+
+      == Config ==
+
+      Override anything in the config (foo.bar=value)
+
+
+      $CONFIG
+
+
+      ${hydra.help.footer}
+
+      '
+  hydra_help:
+    hydra_help: ???
+    template: 'Hydra (${hydra.runtime.version})
+
+      See https://hydra.cc for more info.
+
+
+      == Flags ==
+
+      $FLAGS_HELP
+
+
+      == Configuration groups ==
+
+      Compose your configuration from those groups (For example, append hydra/job_logging=disabled
+      to command line)
+
+
+      $HYDRA_CONFIG_GROUPS
+
+
+      Use ''--cfg hydra'' to Show the Hydra config.
+
+      '
+  output_subdir: .hydra
+  overrides:
+    hydra: []
+    task:
+    - mode=test
+    - eval_task=stack-block-pyramid-seq-seen-colors
+    - type=single
+    - data_dir=/home/ubuntu/cliport/cliport_data
+    - n_demos=138
+    - agent=cliport
+    - model_path=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/checkpoints
+    - train_config=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/.hydra/config.yaml
+    - checkpoint_type=last
+    - save_results=true
+    - update_results=true
+    - save_path=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/eval2
+    - results_path=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/eval2
+  job:
+    name: eval
+    override_dirname: agent=cliport,checkpoint_type=last,data_dir=/home/ubuntu/cliport/cliport_data,eval_task=stack-block-pyramid-seq-seen-colors,mode=test,model_path=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/checkpoints,n_demos=138,results_path=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/eval2,save_path=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/eval2,save_results=true,train_config=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/.hydra/config.yaml,type=single,update_results=true
+    id: ???
+    num: ???
+    config_name: eval
+    env_set: {}
+    env_copy: []
+    config:
+      override_dirname:
+        kv_sep: '='
+        item_sep: ','
+        exclude_keys: []
+  runtime:
+    version: 1.0.5
+    cwd: /home/ubuntu/cliport
+  verbose: false

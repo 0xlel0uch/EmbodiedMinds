@@ -1,0 +1,13 @@
+- mode=test
+- eval_task=stack-block-pyramid-seq-seen-colors
+- type=single
+- data_dir=/home/ubuntu/cliport/cliport_data
+- n_demos=138
+- agent=cliport
+- model_path=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/checkpoints
+- train_config=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/.hydra/config.yaml
+- checkpoint_type=last
+- save_results=true
+- update_results=true
+- save_path=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/eval2
+- results_path=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/eval2

@@ -1,0 +1,34 @@
+mode: test
+agent: cliport
+n_demos: 138
+train_demos: 1000
+n_repeats: 1
+gpu:
+- 0
+save_results: true
+update_results: true
+checkpoint_type: last
+val_on_heldout: true
+disp: false
+shared_memory: false
+eval_task: stack-block-pyramid-seq-seen-colors
+model_task: ${eval_task}
+type: single
+model_dir: ${root_dir}
+exp_folder: exps
+data_dir: /home/ubuntu/cliport/cliport_data
+assets_root: ${root_dir}/cliport/environments/assets/
+model_path: /home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/checkpoints
+train_config: /home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/.hydra/config.yaml
+save_path: /home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/eval2
+results_path: /home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/eval2
+record:
+  save_video: false
+  save_video_path: ${model_dir}/${exp_folder}/${eval_task}-${agent}-n${train_demos}-train/videos/
+  add_text: true
+  fps: 20
+  video_height: 640
+  video_width: 720
+root_dir: ${env:CLIPORT_ROOT}
+tag: default
+debug: false
