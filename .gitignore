@@ -67,7 +67,6 @@ tensorboard/
 
 # Secrets / credentials / env files
 .env
-.env.* 
 *.key
 *.pem
 credentials.json
