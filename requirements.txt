@@ -1,54 +1,44 @@
-# Core ML frameworks
-torch>=2.1.0
-torchvision>=0.16.0
-transformers>=4.36.0
-accelerate>=0.25.0
-bitsandbytes>=0.41.0
+# Combined requirements for the project. Adjust versions as needed for your environment.
 
-# Vision and multimodal
-timm>=0.9.0
-clip @ git+https://github.com/openai/CLIP.git
-pillow>=10.0.0
-opencv-python>=4.8.0
-einops>=0.7.0
-
-# EmbodiedBench dependencies
-ai2thor>=5.0.0
-habitat-sim>=0.2.4
-pybullet>=3.2.5
-
-# Graph database for Hypothesis 3
-neo4j>=5.14.0
-py2neo>=2021.2.3
-
-# Object detection (for Hypothesis 1 & 2)
-ultralytics>=8.0.0  # YOLO
-# detectron2 @ git+https://github.com/facebookresearch/detectron2.git
-
-# Depth estimation
-# Will use transformers[depth-estimation]
-
-# Experiment tracking
-wandb>=0.16.0
-tensorboard>=2.15.0
-
-# Utilities
+# Core ML / DL
+torch>=2.0.0
+torchvision>=0.15.0
 numpy>=1.24.0
-pandas>=2.0.0
-matplotlib>=3.7.0
-seaborn>=0.12.0
-tqdm>=4.66.0
-pyyaml>=6.0
 scipy>=1.11.0
 scikit-learn>=1.3.0
 
-# Development
+# Vision / CV
+opencv-python>=4.7.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+Pillow>=9.5.0
+
+# Data & utils
+pandas>=2.0.0
+pyyaml>=6.0
+tqdm>=4.66.0
+
+# Experiment tracking / logging
+wandb>=0.16.0
+tensorboard>=2.15.0
+
+# Hugging Face ecosystem
+datasets>=2.14.0
+huggingface-hub>=0.14.0, <1.0.0
+transformers>=4.34.0
+
+# Config / CLI
+hydra-core>=1.3.0
+
+# Dev / testing
 pytest>=7.4.0
-black>=23.0.0
-flake8>=6.0.0
 ipython>=8.12.0
 jupyter>=1.0.0
+black>=23.0.0
+flake8>=6.0.0
 
-# Additional useful packages
-datasets>=2.14.0  # HuggingFace datasets
-hydra-core>=1.3.0  # Configuration management
+ultralytics>=8.0.0
+timm>=0.10.0
+
+# Optional (models / checkpoints)
+# Add GPU-specific torch wheels if needed (e.g., from pytorch.org) instead of the above torch line.
