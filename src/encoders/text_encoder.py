@@ -6,7 +6,7 @@ from torch import optim
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from src.datasets.dataloader import build_dataloader
+from data_loader import build_dataloader
 from src.models.agent_model import AgentModel
 
 class TextEncoder(nn.Module):
@@ -57,16 +57,28 @@ def train(
     epochs=3,
     lr=1e-4,
     device=None,
+    use_3d_preprocessing=True,
 ):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs("checkpoints", exist_ok=True)
 
-    train_dl = build_dataloader(batch_size=batch_size, debug=False, data_root=data_root, num_workers=2)
-    val_dl = build_dataloader(batch_size=batch_size, debug=True, data_root=data_root, num_workers=2)
-
-    # wrap dataloaders with collate
-    train_dl = DataLoader(train_dl.dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-    val_dl = DataLoader(val_dl.dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    # Build dataloaders with 3D preprocessing
+    train_dl = build_dataloader(
+        batch_size=batch_size, 
+        debug=False, 
+        data_root=data_root, 
+        num_workers=0,  # Set to 0 to avoid multiprocessing issues with models
+        use_3d_preprocessing=use_3d_preprocessing,
+        device=device
+    )
+    val_dl = build_dataloader(
+        batch_size=batch_size, 
+        debug=True, 
+        data_root=data_root, 
+        num_workers=0,
+        use_3d_preprocessing=use_3d_preprocessing,
+        device=device
+    )
 
     # model
     bins = [101,101,101,121,121,121,2]
@@ -82,12 +94,30 @@ def train(
         model.train()
         pbar = tqdm(train_dl, desc=f"Epoch {epoch} train")
         running_loss = 0.0
-        for instrs, demo_imgs, current_imgs, targets in pbar:
-            demo_imgs = demo_imgs.to(device)
-            current_imgs = current_imgs.to(device)
-            targets = targets.to(device)
-
-            logits = model.forward(instrs, demo_imgs, current_imgs)
+        for batch in pbar:
+            if use_3d_preprocessing:
+                # New 3D preprocessing format
+                instructions = batch['instructions']
+                demo_3d_objects = batch['demo_3d_objects']
+                current_3d_objects = batch['current_3d_objects']
+                demo_actions = batch.get('demo_actions', None)
+                targets = batch['targets'].to(device)
+                
+                logits = model.forward(
+                    instructions,
+                    demo_3d_objects,
+                    current_3d_objects,
+                    demo_actions
+                )
+            else:
+                # Old format (for backward compatibility)
+                instrs, demo_imgs, current_imgs, targets = batch
+                demo_imgs = demo_imgs.to(device)
+                current_imgs = current_imgs.to(device)
+                targets = targets.to(device)
+                # Note: Old format won't work with new AgentModel - would need old model
+                raise NotImplementedError("Old format not supported with new AgentModel")
+            
             loss = model.heads.loss(logits, targets)
             optimizer.zero_grad()
             loss.backward()
@@ -101,11 +131,23 @@ def train(
         correct = [0]*7
         total = 0
         with torch.no_grad():
-            for instrs, demo_imgs, current_imgs, targets in tqdm(val_dl, desc="val"):
-                demo_imgs = demo_imgs.to(device)
-                current_imgs = current_imgs.to(device)
-                targets = targets.to(device)
-                logits = model.forward(instrs, demo_imgs, current_imgs)
+            for batch in tqdm(val_dl, desc="val"):
+                if use_3d_preprocessing:
+                    instructions = batch['instructions']
+                    demo_3d_objects = batch['demo_3d_objects']
+                    current_3d_objects = batch['current_3d_objects']
+                    demo_actions = batch.get('demo_actions', None)
+                    targets = batch['targets'].to(device)
+                    
+                    logits = model.forward(
+                        instructions,
+                        demo_3d_objects,
+                        current_3d_objects,
+                        demo_actions
+                    )
+                else:
+                    raise NotImplementedError("Old format not supported")
+                
                 preds = model.heads.predict(logits).cpu()
                 tgt = targets.cpu()
                 mask = (tgt != -1)
