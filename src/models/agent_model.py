@@ -82,10 +82,18 @@ class AgentModel(nn.Module):
         
         # Encode 3D objects
         demo_obj_embeds = []
-        num_demos = len(demo_3d_objects[0]) if demo_3d_objects and len(demo_3d_objects) > 0 else 0
+        # Find maximum number of demos across batch
+        num_demos = max(len(demo_3d_objects[b]) for b in range(len(demo_3d_objects))) if demo_3d_objects and len(demo_3d_objects) > 0 else 0
         
         for demo_idx in range(num_demos):
-            batch_objs = [demo_3d_objects[b][demo_idx] for b in range(len(demo_3d_objects))]
+            batch_objs = []
+            for b in range(len(demo_3d_objects)):
+                # Handle variable number of demos per example
+                if demo_idx < len(demo_3d_objects[b]):
+                    batch_objs.append(demo_3d_objects[b][demo_idx])
+                else:
+                    # Use empty tensor if this example has fewer demos
+                    batch_objs.append(torch.zeros((0, 7), dtype=torch.float32))
             demo_obj_embeds.append(self._encode_object_batch(batch_objs))
         
         current_obj_embeds = self._encode_object_batch(current_3d_objects)
