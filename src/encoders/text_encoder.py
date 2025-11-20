@@ -154,6 +154,10 @@ def train(
         model.eval()
         correct = [0]*7
         total = 0
+        all_val_predictions = []
+        all_val_targets = []
+        all_val_instructions = []
+        
         with torch.no_grad():
             for batch in tqdm(val_dl, desc="val"):
                 if use_3d_preprocessing:
@@ -174,6 +178,12 @@ def train(
                 
                 preds = model.heads.predict(logits).cpu()
                 tgt = targets.cpu()
+                
+                # Save predictions and targets for analysis
+                all_val_predictions.append(preds.numpy())
+                all_val_targets.append(tgt.numpy())
+                all_val_instructions.extend(instructions)
+                
                 mask = (tgt != -1)
                 for i in range(7):
                     valid = mask[:, i]
@@ -216,9 +226,15 @@ def train(
         
         # Save training metrics (basic accuracy metrics)
         import json
+        import numpy as np
         from pathlib import Path
         metrics_dir = Path("logs")
         metrics_dir.mkdir(exist_ok=True)
+        
+        # Concatenate all predictions and targets
+        val_predictions = np.concatenate(all_val_predictions, axis=0) if all_val_predictions else []
+        val_targets = np.concatenate(all_val_targets, axis=0) if all_val_targets else []
+        
         metrics = {
             "epoch": epoch,
             "train_loss": train_loss,
@@ -230,10 +246,21 @@ def train(
             },
             "avg_accuracy": avg_val_acc,
             "best_val_loss": best_val_loss,
-            "best_epoch": best_epoch
+            "best_epoch": best_epoch,
+            "num_val_samples": len(val_predictions)
         }
         with open(metrics_dir / f"training_metrics_epoch_{epoch}.json", "w") as f:
             json.dump(metrics, f, indent=2)
+        
+        # Save predictions vs targets for detailed analysis
+        predictions_file = metrics_dir / f"predictions_epoch_{epoch}.npz"
+        np.savez(
+            predictions_file,
+            predictions=val_predictions,
+            targets=val_targets,
+            instructions=all_val_instructions
+        )
+        print(f"  Saved predictions to: {predictions_file}")
         
         # Early stopping
         if early_stopping_enabled and patience_counter >= early_stopping_patience:
