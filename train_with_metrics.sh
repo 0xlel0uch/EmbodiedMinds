@@ -5,7 +5,7 @@ set -e
 
 # Configuration
 DATA_ROOT="./data/EB-Man_trajectory_dataset"
-BATCH_SIZE=8
+BATCH_SIZE=16  # Increased from 8 (tested: GPU can handle up to 32, using 16 for safety)
 EPOCHS=50
 LR=1e-4
 EARLY_STOPPING_PATIENCE=5  # Stop if no improvement for 5 epochs
