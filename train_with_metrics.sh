@@ -29,7 +29,8 @@ mkdir -p "$LOG_DIR" "$CHECKPOINT_DIR"
 # Start training
 echo ""
 echo "Starting training..."
-python3 src/encoders/text_encoder.py \
+cd ~/EmbodiedMinds
+PYTHONPATH=. python3 src/encoders/text_encoder.py \
     --data-root "$DATA_ROOT" \
     --batch-size "$BATCH_SIZE" \
     --epochs "$EPOCHS" \
@@ -57,7 +58,7 @@ echo "=========================================="
 echo "Running Trajectory Evaluation"
 echo "=========================================="
 
-python3 evaluate_trajectory.py \
+PYTHONPATH=. python3 evaluate_trajectory.py \
     --checkpoint "$LATEST_CHECKPOINT" \
     --data-root "$DATA_ROOT" \
     --max-episodes 100 \
