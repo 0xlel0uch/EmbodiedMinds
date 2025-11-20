@@ -44,7 +44,13 @@ class AgentModel(nn.Module):
         self.policy = PolicyTransformer(token_dim=token_dim, out_dim=out_dim)
         self.heads = OutputHeads(in_dim=out_dim, bins=bins)
         
-        # Trainable params to device
+        # Move all trainable modules to device
+        self.object_enc = self.object_enc.to(device)
+        self.seq_builder = self.seq_builder.to(device)
+        self.policy = self.policy.to(device)
+        self.heads = self.heads.to(device)
+        
+        # Also call to(device) on the whole model to ensure everything is moved
         self.to(device)
     
     def forward(
