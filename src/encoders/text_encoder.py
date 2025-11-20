@@ -163,8 +163,26 @@ def train(
         print(f"Epoch {epoch} loss={running_loss/len(train_dl):.4f} val_accs={accs}")
 
         # save single checkpoint
-        ckpt = {"model_state": model.state_dict(), "bins": bins}
+        ckpt = {"model_state": model.state_dict(), "bins": bins, "epoch": epoch}
         torch.save(ckpt, f"checkpoints/agent_epoch{epoch}.pt")
+        
+        # Save training metrics (basic accuracy metrics)
+        import json
+        from pathlib import Path
+        metrics_dir = Path("logs")
+        metrics_dir.mkdir(exist_ok=True)
+        metrics = {
+            "epoch": epoch,
+            "loss": running_loss/len(train_dl),
+            "val_accuracies": {
+                "x": accs[0], "y": accs[1], "z": accs[2],
+                "roll": accs[3], "pitch": accs[4], "yaw": accs[5],
+                "gripper": accs[6]
+            },
+            "avg_accuracy": sum(accs) / len(accs)
+        }
+        with open(metrics_dir / f"training_metrics_epoch_{epoch}.json", "w") as f:
+            json.dump(metrics, f, indent=2)
 
 if __name__ == "__main__":
     # simple CLI-friendly entry

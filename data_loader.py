@@ -108,25 +108,52 @@ class EmbodiedDataset(Dataset):
         else:
             full_path = Path(image_path)
         
+        # Try multiple path resolutions
         if not full_path.exists():
-            # Try alternative: look in images/visual/ directory
             path_parts = Path(image_path).parts
-            if 'images' in path_parts:
-                # Try visual category
-                alt_path = self.dataset_dir / "images" / "visual" / path_parts[-2] / path_parts[-1]
-                if alt_path.exists():
-                    full_path = alt_path
-                else:
-                    # Try finding in any subdirectory
-                    episode_dir = self.dataset_dir / "images" / "visual" / path_parts[-2]
-                    if episode_dir.exists():
-                        # Find matching file
-                        matching = list(episode_dir.glob(path_parts[-1]))
-                        if matching:
-                            full_path = matching[0]
+            
+            # Strategy 1: Try images/visual/ directory (based on user's folder structure)
+            if len(path_parts) >= 2:
+                episode_name = path_parts[-2]  # e.g., "episode_1"
+                filename = path_parts[-1]      # e.g., "step_1.png"
+                
+                # Look in images/visual/episode_X/
+                visual_path = self.dataset_dir / "images" / "visual" / episode_name / filename
+                if visual_path.exists():
+                    full_path = visual_path
+            
+            # Strategy 2: Search for the file in any subdirectory
+            if not full_path.exists() and len(path_parts) >= 2:
+                episode_name = path_parts[-2]
+                filename = path_parts[-1]
+                
+                # Search in all model directories
+                images_dir = self.dataset_dir / "images"
+                if images_dir.exists():
+                    for model_dir in images_dir.iterdir():
+                        if model_dir.is_dir():
+                            for category_dir in model_dir.iterdir():
+                                if category_dir.is_dir():
+                                    episode_dir = category_dir / episode_name
+                                    if episode_dir.exists():
+                                        candidate = episode_dir / filename
+                                        if candidate.exists():
+                                            full_path = candidate
+                                            break
+                            if full_path.exists():
+                                break
+            
+            # Strategy 3: Direct search by filename
+            if not full_path.exists() and len(path_parts) > 0:
+                filename = path_parts[-1]
+                images_dir = self.dataset_dir / "images"
+                if images_dir.exists():
+                    matches = list(images_dir.rglob(filename))
+                    if matches:
+                        full_path = matches[0]
         
         if not full_path.exists():
-            raise FileNotFoundError(f"Image not found: {full_path}")
+            raise FileNotFoundError(f"Image not found: {image_path} (tried: {full_path})")
         
         # Load image
         img = cv2.imread(str(full_path))
