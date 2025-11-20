@@ -48,7 +48,12 @@ class OutputHeads(nn.Module):
         loss_fn = nn.CrossEntropyLoss(ignore_index=-1)
         total = 0.0
         for i, log in enumerate(logits):
-            total = total + loss_fn(log, targets[:, i])
+            target_dim = targets[:, i].clone()
+            # Clamp targets to valid range [0, bins[i]-1] or keep -1 for invalid
+            # Invalid targets (-1) are ignored by ignore_index=-1
+            valid_mask = (target_dim >= 0) & (target_dim < self.bins[i])
+            target_dim[~valid_mask] = -1  # Mark out-of-range targets as invalid
+            total = total + loss_fn(log, target_dim)
         return total / len(logits)
 
     def predict(self, logits):
