@@ -284,6 +284,10 @@ class EmbodiedDataset(Dataset):
             "meta_path": f"episode_{item.get('episode_id', idx)}"
         }
 
+# Global cache for preprocessing models (to avoid reloading for each batch)
+_detector_cache = {}
+_estimator_cache = {}
+
 def collate_fn_3d(batch, device="cpu"):
     """
     Collate function that performs 3D preprocessing on images.
@@ -304,9 +308,16 @@ def collate_fn_3d(batch, device="cpu"):
             - demo_actions: List[torch.Tensor] - one per batch element (last action from each demo)
             - targets: (B, 7) tensor
     """
-    # Initialize preprocessing models (lazy initialization - could be cached)
-    detector = ObjectDetector(device=device)
-    estimator = DepthEstimator(device=device)
+    # Use cached models to avoid reloading for each batch
+    global _detector_cache, _estimator_cache
+    
+    if device not in _detector_cache:
+        _detector_cache[device] = ObjectDetector(device=device)
+    detector = _detector_cache[device]
+    
+    if device not in _estimator_cache:
+        _estimator_cache[device] = DepthEstimator(device=device)
+    estimator = _estimator_cache[device]
     
     instructions = []
     demo_3d_objects_list = []
