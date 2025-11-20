@@ -48,34 +48,213 @@ def resolve_data_root():
 
 class EmbodiedDataset(Dataset):
     """
-    Minimal dataset scaffold. Replace loading logic with your actual format.
-    Uses self.data_root to find files.
+    Dataset loader for EB-Man trajectory dataset.
+    Loads from JSON files and image directories.
     """
-    def __init__(self, data_root=None, debug=False):
+    def __init__(self, data_root=None, debug=False, dataset_type="single_step"):
+        """
+        Args:
+            data_root: Root directory containing EB-Man_trajectory_dataset
+            debug: If True, use smaller subset
+            dataset_type: "single_step" or "multi_step"
+        """
         self.data_root = Path(data_root) if data_root else resolve_data_root()
         self.debug = debug
-        # Example: expect a folder 'examples' with JSON metadata; adapt as needed
-        examples_dir = self.data_root / "examples"
-        if examples_dir.exists():
-            self.examples = sorted(list(examples_dir.glob("*.json")))
-        else:
-            # fallback: any json files in data root
-            self.examples = sorted(list(self.data_root.glob("*.json")))
+        self.dataset_type = dataset_type
+        
+        # Find dataset directory
+        dataset_dir = self.data_root / "EB-Man_trajectory_dataset"
+        if not dataset_dir.exists():
+            dataset_dir = self.data_root
+        
+        # Load JSON file
+        json_file = dataset_dir / f"eb-man_dataset_{dataset_type}.json"
+        if not json_file.exists():
+            # Try alternative locations
+            json_file = dataset_dir / "eb-man_dataset_single_step.json"
+            if not json_file.exists():
+                raise FileNotFoundError(f"Could not find dataset JSON in {dataset_dir}")
+        
+        print(f"Loading dataset from: {json_file}")
+        with open(json_file, 'r') as f:
+            self.data = json.load(f)
+        
+        # Filter and limit for debug
         if debug:
-            self.examples = self.examples[:20]
+            self.data = self.data[:20]
+        
+        self.dataset_dir = dataset_dir
+        print(f"Loaded {len(self.data)} examples")
 
     def __len__(self):
-        return len(self.examples)
+        return len(self.data)
+
+    def _parse_action_string(self, action_str):
+        """Parse action string like '[33, 43, 27, 0, 60, 90, 1]' to list"""
+        if isinstance(action_str, str):
+            # Remove brackets and split
+            action_str = action_str.strip('[]')
+            return [int(x.strip()) for x in action_str.split(',')]
+        return action_str
+
+    def _load_image(self, image_path):
+        """Load image from path relative to dataset directory"""
+        import cv2
+        from PIL import Image
+        
+        # Handle relative paths
+        if not Path(image_path).is_absolute():
+            full_path = self.dataset_dir / image_path
+        else:
+            full_path = Path(image_path)
+        
+        if not full_path.exists():
+            # Try alternative: look in images/visual/ directory
+            path_parts = Path(image_path).parts
+            if 'images' in path_parts:
+                # Try visual category
+                alt_path = self.dataset_dir / "images" / "visual" / path_parts[-2] / path_parts[-1]
+                if alt_path.exists():
+                    full_path = alt_path
+                else:
+                    # Try finding in any subdirectory
+                    episode_dir = self.dataset_dir / "images" / "visual" / path_parts[-2]
+                    if episode_dir.exists():
+                        # Find matching file
+                        matching = list(episode_dir.glob(path_parts[-1]))
+                        if matching:
+                            full_path = matching[0]
+        
+        if not full_path.exists():
+            raise FileNotFoundError(f"Image not found: {full_path}")
+        
+        # Load image
+        img = cv2.imread(str(full_path))
+        if img is None:
+            # Try with PIL
+            img = np.array(Image.open(full_path).convert('RGB'))
+        else:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # Convert to tensor (H, W, 3) -> (3, H, W)
+        img_tensor = torch.from_numpy(img).permute(2, 0, 1).float()
+        return img_tensor
 
     def __getitem__(self, idx):
-        # Placeholder item. Replace with actual image/depth/bbox/action loading & preprocessing.
-        meta_path = str(self.examples[idx]) if self.examples else ""
+        """
+        Returns:
+            dict with keys:
+                - instruction: str
+                - demo_images: List of (3, H, W) tensors
+                - current_image: (3, H, W) tensor
+                - demo_actions: List of action tensors (7,) or (max_steps, 7)
+        """
+        item = self.data[idx]
+        trajectory = item.get('trajectory', [])
+        
+        # Extract instruction
+        instruction = item.get('instruction', '')
+        
+        # Extract demo images and actions from trajectory
+        demo_images = []
+        demo_actions = []
+        
+        for step in trajectory:
+            # Get executable plan
+            exec_plan = step.get('executable_plan', {})
+            
+            # Handle both dict and list formats
+            if isinstance(exec_plan, list):
+                # Multi-step format: executable_plan is a list
+                for plan_item in exec_plan:
+                    img_path = plan_item.get('img_path')
+                    action_str = plan_item.get('action')
+                    if img_path and action_str:
+                        try:
+                            img = self._load_image(img_path)
+                            demo_images.append(img)
+                            action = self._parse_action_string(action_str)
+                            demo_actions.append(torch.tensor(action, dtype=torch.long))
+                        except Exception as e:
+                            print(f"Warning: Failed to load {img_path}: {e}")
+                            continue
+            elif isinstance(exec_plan, dict):
+                # Single-step format: executable_plan is a dict
+                img_path = exec_plan.get('img_path')
+                action_str = exec_plan.get('action')
+                if img_path and action_str:
+                    try:
+                        img = self._load_image(img_path)
+                        demo_images.append(img)
+                        action = self._parse_action_string(action_str)
+                        demo_actions.append(torch.tensor(action, dtype=torch.long))
+                    except Exception as e:
+                        print(f"Warning: Failed to load {img_path}: {e}")
+                        continue
+            
+            # Also check input_image_path for additional context
+            input_img_path = step.get('input_image_path')
+            if input_img_path and input_img_path not in [exec_plan.get('img_path') if isinstance(exec_plan, dict) else None]:
+                try:
+                    img = self._load_image(input_img_path)
+                    # Use as demo if we don't have many demos yet
+                    if len(demo_images) < 3:
+                        demo_images.append(img)
+                except:
+                    pass
+        
+        # Get current image (last step's input image or last demo image)
+        current_image = None
+        if trajectory:
+            last_step = trajectory[-1]
+            input_img_path = last_step.get('input_image_path')
+            if input_img_path:
+                try:
+                    current_image = self._load_image(input_img_path)
+                except:
+                    pass
+        
+        # Fallback: use last demo image as current
+        if current_image is None and demo_images:
+            current_image = demo_images[-1]
+        
+        # Fallback: create dummy image
+        if current_image is None:
+            current_image = torch.zeros(3, 224, 224, dtype=torch.float32)
+        
+        # Stack demo images if we have any
+        if demo_images:
+            # Pad to same size if needed
+            max_h = max(img.shape[1] for img in demo_images)
+            max_w = max(img.shape[2] for img in demo_images)
+            padded_demos = []
+            for img in demo_images:
+                if img.shape[1] != max_h or img.shape[2] != max_w:
+                    # Resize
+                    img = torch.nn.functional.interpolate(
+                        img.unsqueeze(0), 
+                        size=(max_h, max_w), 
+                        mode='bilinear', 
+                        align_corners=False
+                    ).squeeze(0)
+                padded_demos.append(img)
+            demo_images_tensor = torch.stack(padded_demos, dim=0)  # (num_demos, 3, H, W)
+        else:
+            demo_images_tensor = torch.zeros(0, 3, 224, 224, dtype=torch.float32)
+        
+        # Format demo actions
+        if demo_actions:
+            # Stack actions: (num_demos, 7)
+            demo_actions_tensor = torch.stack(demo_actions, dim=0)
+        else:
+            demo_actions_tensor = torch.zeros(0, 7, dtype=torch.long)
+        
         return {
-            "instruction": "stack the star",
-            "image": torch.zeros(3, 224, 224, dtype=torch.float32),
-            "objects": torch.zeros(10, 128, dtype=torch.float32),   # object embeddings placeholder
-            "action_labels": torch.zeros(7, dtype=torch.long),
-            "meta_path": meta_path
+            "instruction": instruction,
+            "demo_images": demo_images_tensor,  # (num_demos, 3, H, W)
+            "current_image": current_image,  # (3, H, W)
+            "demo_actions": [demo_actions_tensor],  # List with one tensor (num_demos, 7)
+            "meta_path": f"episode_{item.get('episode_id', idx)}"
         }
 
 def collate_fn_3d(batch, device="cpu"):
