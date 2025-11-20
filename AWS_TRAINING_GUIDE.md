@@ -797,6 +797,47 @@ def stop_instance_on_completion():
 
 ---
 
+## Setup Status
+
+### Current Instance
+- **Public IP:** 3.139.95.113
+- **Username:** ec2-user
+- **GPU:** NVIDIA A10G (23.68 GB)
+- **CUDA:** 12.1
+- **S3 Bucket:** `11777-h1`
+- **Region:** `us-east-2`
+
+### Quick Connect
+```bash
+ssh -i /Users/abhivakil/Desktop/11777.pem ec2-user@3.139.95.113
+cd ~/EmbodiedMinds
+```
+
+### S3 Setup
+The instance should have an IAM role attached with S3 access. Verify:
+```bash
+aws sts get-caller-identity
+aws s3 ls s3://11777-h1/ --region us-east-2
+```
+
+## Training Optimization
+
+### Current Settings
+- **Batch Size:** 16 (optimized from 8)
+- **Early Stopping:** Enabled (patience=5)
+- **Expected Time:** ~1-2.5 hours with early stopping
+
+### GPU Memory
+- **Total:** 23.68 GB
+- **Used (batch_size=16):** ~2.6-3 GB
+- **Available:** ~21 GB free
+- **Can safely use:** batch_size up to 32 if needed
+
+### Speed Improvements
+- **batch_size=8:** ~30-40 min/epoch
+- **batch_size=16:** ~15-20 min/epoch (2x faster)
+- **With early stopping:** Typically stops after 10-15 epochs
+
 ## Troubleshooting
 
 ### Common Issues
