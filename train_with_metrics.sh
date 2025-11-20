@@ -8,6 +8,8 @@ DATA_ROOT="./data/EB-Man_trajectory_dataset"
 BATCH_SIZE=8
 EPOCHS=50
 LR=1e-4
+EARLY_STOPPING_PATIENCE=5  # Stop if no improvement for 5 epochs
+EARLY_STOPPING_MIN_DELTA=0.001  # Minimum improvement threshold
 LOG_DIR="./logs"
 CHECKPOINT_DIR="./checkpoints"
 S3_BUCKET="11777-h1"
@@ -28,13 +30,17 @@ mkdir -p "$LOG_DIR" "$CHECKPOINT_DIR"
 
 # Start training
 echo ""
-echo "Starting training..."
+echo "Starting training with early stopping..."
+echo "Early stopping patience: $EARLY_STOPPING_PATIENCE epochs"
+echo "Early stopping min delta: $EARLY_STOPPING_MIN_DELTA"
 cd ~/EmbodiedMinds
 PYTHONPATH=. python3 src/encoders/text_encoder.py \
     --data-root "$DATA_ROOT" \
     --batch-size "$BATCH_SIZE" \
     --epochs "$EPOCHS" \
     --lr "$LR" \
+    --early-stopping-patience "$EARLY_STOPPING_PATIENCE" \
+    --early-stopping-min-delta "$EARLY_STOPPING_MIN_DELTA" \
     2>&1 | tee "$LOG_DIR/training.log"
 
 echo ""
@@ -42,15 +48,20 @@ echo "=========================================="
 echo "Training Complete!"
 echo "=========================================="
 
-# Find latest checkpoint
+# Find best checkpoint (preferred) or latest checkpoint
+BEST_CHECKPOINT="$CHECKPOINT_DIR/agent_best.pt"
 LATEST_CHECKPOINT=$(ls -t "$CHECKPOINT_DIR"/agent_epoch*.pt 2>/dev/null | head -1)
 
-if [ -z "$LATEST_CHECKPOINT" ]; then
+if [ -f "$BEST_CHECKPOINT" ]; then
+    CHECKPOINT_TO_USE="$BEST_CHECKPOINT"
+    echo "Using best checkpoint: $CHECKPOINT_TO_USE"
+elif [ -n "$LATEST_CHECKPOINT" ]; then
+    CHECKPOINT_TO_USE="$LATEST_CHECKPOINT"
+    echo "Using latest checkpoint: $CHECKPOINT_TO_USE"
+else
     echo "⚠️  No checkpoint found!"
     exit 1
 fi
-
-echo "Latest checkpoint: $LATEST_CHECKPOINT"
 echo ""
 
 # Run comprehensive trajectory evaluation
@@ -58,8 +69,8 @@ echo "=========================================="
 echo "Running Trajectory Evaluation"
 echo "=========================================="
 
-PYTHONPATH=. python3 evaluate_trajectory.py \
-    --checkpoint "$LATEST_CHECKPOINT" \
+PYTHONPATH=. PYTHONPATH=. python3 evaluate_trajectory.py \
+    --checkpoint "$CHECKPOINT_TO_USE" \
     --data-root "$DATA_ROOT" \
     --max-episodes 100 \
     --success-threshold 0.8 \

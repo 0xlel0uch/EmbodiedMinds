@@ -57,12 +57,34 @@ def train(
     lr=1e-4,
     device=None,
     use_3d_preprocessing=True,
+    early_stopping_patience=5,
+    early_stopping_min_delta=0.001,
+    early_stopping_enabled=True,
 ):
+    """
+    Train the agent model with early stopping.
+    
+    Args:
+        data_root: Path to data directory
+        batch_size: Batch size for training
+        epochs: Maximum number of epochs
+        lr: Learning rate
+        device: Device to train on
+        use_3d_preprocessing: Use 3D preprocessing
+        early_stopping_patience: Number of epochs to wait before stopping if no improvement
+        early_stopping_min_delta: Minimum change to qualify as an improvement
+        early_stopping_enabled: Enable early stopping
+    """
     # Import here to avoid circular import
     from src.models.agent_model import AgentModel
     
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs("checkpoints", exist_ok=True)
+    
+    # Early stopping variables
+    best_val_loss = float('inf')
+    patience_counter = 0
+    best_epoch = 0
 
     # Build dataloaders with 3D preprocessing
     train_dl = build_dataloader(
@@ -160,10 +182,36 @@ def train(
                     correct[i] += (preds[valid, i] == tgt[valid, i]).sum().item()
                 total += tgt.size(0)
         accs = [c / max(1, total) for c in correct]
-        print(f"Epoch {epoch} loss={running_loss/len(train_dl):.4f} val_accs={accs}")
-
-        # save single checkpoint
-        ckpt = {"model_state": model.state_dict(), "bins": bins, "epoch": epoch}
+        avg_val_acc = sum(accs) / len(accs)
+        train_loss = running_loss / len(train_dl)
+        
+        # Calculate validation loss (approximate from accuracy)
+        # Lower accuracy = higher loss (inverse relationship)
+        val_loss = 1.0 - avg_val_acc
+        
+        print(f"Epoch {epoch} train_loss={train_loss:.4f} val_loss={val_loss:.4f} val_acc={avg_val_acc:.4f} val_accs={[f'{a:.3f}' for a in accs]}")
+        
+        # Early stopping check
+        improved = False
+        if early_stopping_enabled:
+            if val_loss < (best_val_loss - early_stopping_min_delta):
+                best_val_loss = val_loss
+                patience_counter = 0
+                best_epoch = epoch
+                improved = True
+                print(f"  ✓ Validation improved! Best val_loss: {best_val_loss:.4f}")
+            else:
+                patience_counter += 1
+                print(f"  No improvement for {patience_counter}/{early_stopping_patience} epochs (best: {best_val_loss:.4f} at epoch {best_epoch})")
+        
+        # Save best checkpoint
+        if improved or epoch == 0:
+            ckpt = {"model_state": model.state_dict(), "bins": bins, "epoch": epoch, "val_loss": val_loss, "val_acc": avg_val_acc}
+            torch.save(ckpt, f"checkpoints/agent_best.pt")
+            print(f"  Saved best checkpoint: checkpoints/agent_best.pt")
+        
+        # Save epoch checkpoint
+        ckpt = {"model_state": model.state_dict(), "bins": bins, "epoch": epoch, "val_loss": val_loss, "val_acc": avg_val_acc}
         torch.save(ckpt, f"checkpoints/agent_epoch{epoch}.pt")
         
         # Save training metrics (basic accuracy metrics)
@@ -173,16 +221,28 @@ def train(
         metrics_dir.mkdir(exist_ok=True)
         metrics = {
             "epoch": epoch,
-            "loss": running_loss/len(train_dl),
+            "train_loss": train_loss,
+            "val_loss": val_loss,
             "val_accuracies": {
                 "x": accs[0], "y": accs[1], "z": accs[2],
                 "roll": accs[3], "pitch": accs[4], "yaw": accs[5],
                 "gripper": accs[6]
             },
-            "avg_accuracy": sum(accs) / len(accs)
+            "avg_accuracy": avg_val_acc,
+            "best_val_loss": best_val_loss,
+            "best_epoch": best_epoch
         }
         with open(metrics_dir / f"training_metrics_epoch_{epoch}.json", "w") as f:
             json.dump(metrics, f, indent=2)
+        
+        # Early stopping
+        if early_stopping_enabled and patience_counter >= early_stopping_patience:
+            print(f"\n{'='*60}")
+            print(f"Early stopping triggered!")
+            print(f"Best validation loss: {best_val_loss:.4f} at epoch {best_epoch}")
+            print(f"No improvement for {patience_counter} epochs")
+            print(f"{'='*60}\n")
+            break
 
 if __name__ == "__main__":
     # simple CLI-friendly entry
@@ -192,5 +252,19 @@ if __name__ == "__main__":
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--epochs", type=int, default=3)
     p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--early-stopping-patience", type=int, default=5,
+                   help="Number of epochs to wait before early stopping")
+    p.add_argument("--early-stopping-min-delta", type=float, default=0.001,
+                   help="Minimum change to qualify as improvement")
+    p.add_argument("--no-early-stopping", action="store_true",
+                   help="Disable early stopping")
     args = p.parse_args()
-    train(data_root=args.data_root, batch_size=args.batch_size, epochs=args.epochs, lr=args.lr)
+    train(
+        data_root=args.data_root, 
+        batch_size=args.batch_size, 
+        epochs=args.epochs, 
+        lr=args.lr,
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_min_delta=args.early_stopping_min_delta,
+        early_stopping_enabled=not args.no_early_stopping
+    )
