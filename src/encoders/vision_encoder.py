@@ -16,7 +16,14 @@ class VisionEncoder(nn.Module):
     def __init__(self, model_name: str = "openai/clip-vit-base-patch32", device: str = "cpu"):
         super().__init__()
         # Load full CLIP model and use its vision submodule
-        clip = CLIPModel.from_pretrained(model_name)
+        # Use safetensors to avoid torch.load version requirement
+        import os
+        os.environ['TRANSFORMERS_SAFE_LOADING'] = '1'
+        try:
+            clip = CLIPModel.from_pretrained(model_name, use_safetensors=True)
+        except:
+            # Fallback if safetensors not available
+            clip = CLIPModel.from_pretrained(model_name)
         self.vision = clip.vision_model
         self.feature_extractor = CLIPFeatureExtractor.from_pretrained(model_name)
 
