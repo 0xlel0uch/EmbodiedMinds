@@ -71,6 +71,8 @@ class AgentModel(nn.Module):
         """
         # Encode instruction
         instr_embed = self.text_enc.encode(instr_texts)  # (B, 768)
+        # Ensure instruction embedding is on correct device
+        instr_embed = instr_embed.to(self.device)
         
         # Encode 3D objects
         demo_obj_embeds = []
@@ -82,11 +84,16 @@ class AgentModel(nn.Module):
         
         current_obj_embeds = self._encode_object_batch(current_3d_objects)
         
+        # Move demo_actions to device if provided
+        demo_actions_device = None
+        if demo_actions is not None:
+            demo_actions_device = [action.to(self.device) for action in demo_actions]
+        
         # Build sequence
         tokens = self.seq_builder(
             instr_embed,
             demo_obj_embeds,
-            demo_actions if demo_actions else None,
+            demo_actions_device if demo_actions_device else None,
             current_obj_embeds,
         )  # (B, seq_len, token_dim)
         
@@ -116,6 +123,9 @@ class AgentModel(nn.Module):
         
         padded_objs = []
         for objs in object_list:
+            # Move to device if not already there
+            objs = objs.to(self.device)
+            
             if objs.size(0) > 0:
                 encoded = self.object_enc(objs)  # (num_obj, 256)
             else:
