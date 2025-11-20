@@ -7,7 +7,6 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from data_loader import build_dataloader
-from src.models.agent_model import AgentModel
 
 class TextEncoder(nn.Module):
     def __init__(self, model_name="bert-base-uncased", device="cpu"):
@@ -59,6 +58,9 @@ def train(
     device=None,
     use_3d_preprocessing=True,
 ):
+    # Import here to avoid circular import
+    from src.models.agent_model import AgentModel
+    
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     os.makedirs("checkpoints", exist_ok=True)
 
