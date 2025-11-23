@@ -89,23 +89,29 @@ def main():
     )
     
     # Print summary
-    summary = results['summary']
+    summary = results.get('summary', {})
     print("\n" + "="*60)
     print("EVALUATION SUMMARY")
     print("="*60)
-    print(f"Total Tasks Evaluated: {summary['total_tasks']}")
-    print(f"Successful Tasks: {summary['successful_tasks']}")
-    print(f"Failed Tasks: {summary['failed_tasks']}")
-    print(f"\nTask Success Rate: {summary['task_success_rate']:.2%}")
-    print(f"Avg Subgoal Success Rate: {summary['avg_subgoal_success_rate']:.2%}")
-    print(f"Avg Planner Steps: {summary['avg_planner_steps']:.2f}")
-    print(f"Avg Environment Steps: {summary['avg_environment_steps']:.2f}")
-    print(f"\nTotal Errors: {summary['total_errors']}")
     
-    if summary['error_analysis']:
-        print("\nError Analysis:")
-        for error_type, count in summary['error_analysis'].items():
-            print(f"  {error_type}: {count}")
+    if summary:
+        print(f"Total Tasks Evaluated: {summary.get('total_tasks', 0)}")
+        print(f"Successful Tasks: {summary.get('successful_tasks', 0)}")
+        print(f"Failed Tasks: {summary.get('failed_tasks', 0)}")
+        print(f"\nTask Success Rate: {summary.get('task_success_rate', 0.0):.2%}")
+        print(f"Avg Subgoal Success Rate: {summary.get('avg_subgoal_success_rate', 0.0):.2%}")
+        print(f"Avg Planner Steps: {summary.get('avg_planner_steps', 0.0):.2f}")
+        print(f"Avg Environment Steps: {summary.get('avg_environment_steps', 0.0):.2f}")
+        print(f"\nTotal Errors: {summary.get('total_errors', 0)}")
+        
+        error_analysis = summary.get('error_analysis', {})
+        if error_analysis:
+            print("\nError Analysis:")
+            for error_type, count in error_analysis.items():
+                print(f"  {error_type}: {count}")
+    else:
+        print("No tasks were successfully evaluated.")
+        print("Check error messages above for details.")
     
     print("="*60)
     

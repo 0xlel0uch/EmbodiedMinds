@@ -38,6 +38,10 @@ class TrajectoryEvaluator:
         self.device = device
         self.metrics_tracker = metrics_tracker or TaskMetricsTracker()
         
+        # Initialize preprocessing models (cached)
+        self.detector = ObjectDetector(device=device)
+        self.estimator = DepthEstimator(device=device)
+        
         self.model.eval()
         
     def evaluate_episode(self, episode_idx: int, 
@@ -81,12 +85,15 @@ class TrajectoryEvaluator:
         # For trajectory evaluation, we need to simulate step-by-step execution
         # Since we have demo actions, we'll evaluate prediction accuracy
         with torch.no_grad():
-            # Prepare inputs (simplified - in practice, you'd iterate through steps)
-            # For now, evaluate on the current state
-            instructions = [instruction]
-            demo_3d_objects = [item.get('demo_3d_objects', [])]
-            current_3d_objects = [item.get('current_3d_objects', torch.zeros((0, 7)))]
-            demo_actions_list = [demo_actions] if demo_actions else None
+            # Process data using collate_fn_3d to get 3D object representations
+            # Create a batch with single item
+            batch = [item]
+            processed_batch = collate_fn_3d(batch, device=self.device)
+            
+            instructions = processed_batch['instructions']
+            demo_3d_objects = processed_batch['demo_3d_objects']
+            current_3d_objects = processed_batch['current_3d_objects']
+            demo_actions_list = processed_batch.get('demo_actions', None)
             
             # Run model
             logits = self.model.forward(

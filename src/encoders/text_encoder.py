@@ -216,13 +216,46 @@ def train(
         
         # Save best checkpoint
         if improved or epoch == 0:
-            ckpt = {"model_state": model.state_dict(), "bins": bins, "epoch": epoch, "val_loss": val_loss, "val_acc": avg_val_acc}
-            torch.save(ckpt, f"checkpoints/agent_best.pt")
-            print(f"  Saved best checkpoint: checkpoints/agent_best.pt")
+            try:
+                ckpt = {"model_state": model.state_dict(), "bins": bins, "epoch": epoch, "val_loss": val_loss, "val_acc": avg_val_acc}
+                torch.save(ckpt, f"checkpoints/agent_best.pt")
+                print(f"  Saved best checkpoint: checkpoints/agent_best.pt")
+            except RuntimeError as e:
+                if "file write failed" in str(e) or "disk" in str(e).lower():
+                    print(f"  ⚠️  Disk full! Cannot save checkpoint. Free up space and try again.")
+                    # Try to delete old checkpoints
+                    import os
+                    import glob
+                    old_checkpoints = sorted(glob.glob("checkpoints/agent_epoch*.pt"), key=os.path.getmtime)[:-3]  # Keep last 3
+                    for old_ckpt in old_checkpoints:
+                        try:
+                            os.remove(old_ckpt)
+                            print(f"  Deleted old checkpoint: {old_ckpt}")
+                        except:
+                            pass
+                else:
+                    raise
         
-        # Save epoch checkpoint
-        ckpt = {"model_state": model.state_dict(), "bins": bins, "epoch": epoch, "val_loss": val_loss, "val_acc": avg_val_acc}
-        torch.save(ckpt, f"checkpoints/agent_epoch{epoch}.pt")
+        # Save epoch checkpoint (only keep last 3 to save space)
+        try:
+            ckpt = {"model_state": model.state_dict(), "bins": bins, "epoch": epoch, "val_loss": val_loss, "val_acc": avg_val_acc}
+            torch.save(ckpt, f"checkpoints/agent_epoch{epoch}.pt")
+            
+            # Clean up old checkpoints (keep only last 3 + best)
+            import os
+            import glob
+            epoch_checkpoints = sorted(glob.glob("checkpoints/agent_epoch*.pt"), key=os.path.getmtime)
+            if len(epoch_checkpoints) > 3:
+                for old_ckpt in epoch_checkpoints[:-3]:
+                    try:
+                        os.remove(old_ckpt)
+                    except:
+                        pass
+        except RuntimeError as e:
+            if "file write failed" in str(e) or "disk" in str(e).lower():
+                print(f"  ⚠️  Disk full! Cannot save epoch checkpoint. Free up space.")
+            else:
+                raise
         
         # Save training metrics (basic accuracy metrics)
         import json
