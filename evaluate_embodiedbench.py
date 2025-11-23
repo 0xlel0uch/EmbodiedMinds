@@ -131,27 +131,25 @@ def evaluate_embodiedbench_style(
                 instruction = item['instruction']
                 episode_id = item.get('meta_path', f'episode_{episode_idx}')
                 
-                # Extract capability subset from image path
+                # Extract capability subset from dataset entry
                 capability_subset = "unknown"
-                # Try to get path from raw dataset entry
                 if episode_idx < len(dataset.data):
                     raw_entry = dataset.data[episode_idx]
-                    if 'trajectory' in raw_entry:
-                        traj = raw_entry['trajectory']
-                        if traj and len(traj) > 0:
-                            plan = traj[0].get('executable_plan', {})
-                            img_path = plan.get('img_path', '')
-                            if not img_path:
-                                # Try input_image_path
-                                img_path = traj[0].get('input_image_path', '')
-                            capability_subset = extract_capability_subset(img_path)
-                
-                # Fallback: try to extract from eval_set if available
-                if capability_subset == "unknown" and episode_idx < len(dataset.data):
-                    raw_entry = dataset.data[episode_idx]
+                    # First try eval_set field (most reliable)
                     eval_set = raw_entry.get('eval_set', '')
                     if eval_set:
-                        capability_subset = extract_capability_subset(eval_set)
+                        capability_subset = eval_set.lower()
+                    else:
+                        # Fallback: extract from image path
+                        if 'trajectory' in raw_entry:
+                            traj = raw_entry['trajectory']
+                            if traj and len(traj) > 0:
+                                plan = traj[0].get('executable_plan', {})
+                                img_path = plan.get('img_path', '')
+                                if not img_path:
+                                    # Try input_image_path
+                                    img_path = traj[0].get('input_image_path', '')
+                                capability_subset = extract_capability_subset(img_path)
                 
                 # Process data using collate_fn_3d
                 batch = [item]
