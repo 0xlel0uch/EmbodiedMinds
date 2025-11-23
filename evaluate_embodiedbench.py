@@ -29,22 +29,25 @@ def extract_capability_subset(img_path: str) -> str:
     """
     Extract capability subset from image path.
     
-    Path format: "claude-3-5-sonnet-20241022/base/episode_1/step_0.png"
+    Path format: "images/claude-3-5-sonnet-20241022/base/episode_1/step_0.png"
+    or: "claude-3-5-sonnet-20241022/base/episode_1/step_0.png"
     Returns: "base", "common_sense", "complex", "visual", "spatial", or "unknown"
     """
     if not img_path:
         return "unknown"
     
     parts = img_path.split('/')
-    if len(parts) >= 2:
-        subset = parts[1].lower()
-        # Map to standard names
-        if subset in ['base', 'common_sense', 'complex', 'visual', 'spatial']:
-            return subset
+    # Find the capability subset (usually after model name)
+    # Path structure: [images/]model_name/subset/episode_X/step_Y.png
+    for i, part in enumerate(parts):
+        part_lower = part.lower()
+        # Check if this part is a known capability subset
+        if part_lower in ['base', 'common_sense', 'complex', 'visual', 'spatial']:
+            return part_lower
         # Handle variations
-        if 'common' in subset or 'sense' in subset:
+        if 'common' in part_lower or 'sense' in part_lower:
             return 'common_sense'
-        if 'long' in subset or 'horizon' in subset:
+        if 'long' in part_lower or 'horizon' in part_lower:
             return 'long_horizon'
     
     return "unknown"
@@ -130,14 +133,25 @@ def evaluate_embodiedbench_style(
                 
                 # Extract capability subset from image path
                 capability_subset = "unknown"
-                if item.get('demo_images') is not None and len(item['demo_images']) > 0:
-                    # Try to get path from trajectory
-                    if 'trajectory' in dataset.data[episode_idx]:
-                        traj = dataset.data[episode_idx]['trajectory']
+                # Try to get path from raw dataset entry
+                if episode_idx < len(dataset.data):
+                    raw_entry = dataset.data[episode_idx]
+                    if 'trajectory' in raw_entry:
+                        traj = raw_entry['trajectory']
                         if traj and len(traj) > 0:
                             plan = traj[0].get('executable_plan', {})
                             img_path = plan.get('img_path', '')
+                            if not img_path:
+                                # Try input_image_path
+                                img_path = traj[0].get('input_image_path', '')
                             capability_subset = extract_capability_subset(img_path)
+                
+                # Fallback: try to extract from eval_set if available
+                if capability_subset == "unknown" and episode_idx < len(dataset.data):
+                    raw_entry = dataset.data[episode_idx]
+                    eval_set = raw_entry.get('eval_set', '')
+                    if eval_set:
+                        capability_subset = extract_capability_subset(eval_set)
                 
                 # Process data using collate_fn_3d
                 batch = [item]
