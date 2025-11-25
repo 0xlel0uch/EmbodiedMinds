@@ -1,543 +1,374 @@
-
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-EB-Man (Embodied Benchmark Manipulation) -> CLIPort (RavensDataset) converter.
+eb_to_cliport_exact.py
+
+Convert your EB-Manipulation JSON (format as provided) into a CLIPort RavensDataset.
+
+Usage example:
+
+  conda activate cliport
+  cd ~/cliport
+  export CLIPORT_ROOT=~/cliport
+
+  python eb_to_cliport_exact.py \
+    --eb_json /home/ubuntu/cliport/data/embodiedbench/EB-Man_trajectory_dataset/eb-man_dataset_single_step.json \
+    --image_root /home/ubuntu/cliport/data/embodiedbench/EB-Man_trajectory_dataset \
+    --out_root $CLIPORT_ROOT/data \
+    --task_name eb-manip-single-step \
+    --train_fraction 0.9 \
+    --only_success 0
 """
 
 import argparse
 import json
-import os
-import random
-import sys
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
+from PIL import Image
 
-try:
-    from PIL import Image
-except Exception as e:
-    raise SystemExit("Please `pip install pillow` first.")
+from cliport.dataset import RavensDataset
 
 
-# ---- Constants to mimic CLIPort defaults ----
-BOUNDS = np.array([[0.25, 0.75],   # x-range (m)
-                   [-0.5, 0.5],    # y-range (m)
-                   [0.0, 0.28]])   # z-range (m)
-N_CAMS = 3        # CLIPort's standard RealSense D415 3-view setup
-RGB_SIZE = (640, 480)  # (W,H)
-SWAP_XY = False
-FLIP_X = False
-FLIP_Y = False
-FLIP_Z = False
-NEGATE_YAW = False
+# ---------- helpers ----------
 
-@dataclass
-class EbStep:
-    img_path: str
-    action: List[int]  # 7 numbers
-    action_success: float
+def parse_action_str(action_str: str) -> List[int]:
+    """Convert '[33, 43, 27, 0, 60, 90, 1]' -> [33, 43, 27, 0, 60, 90, 1]."""
+    s = action_str.strip()
+    if "[" in s and "]" in s:
+        s = s[s.find("[") + 1 : s.rfind("]")]
+    parts = [p.strip() for p in s.split(",") if p.strip() != ""]
+    return [int(p) for p in parts]
 
 
-@dataclass
-class EbSegment:
-    input_image_path: str
-    steps: List[EbStep]
-
-
-@dataclass
-class EbEpisode:
-    model_name: str
-    eval_set: str
-    episode_id: int
-    instruction: str
-    success: float
-    segments: List[EbSegment]
-
-
-# ---------------- Utility functions ----------------
-
-def _safe_join(root: str, rel: str) -> Optional[str]:
+def find_pick_and_place(actions: List[List[int]]) -> Tuple[int, int]:
     """
-    Try a few common patterns to resolve an EB relative image path.
+    Given list of 7D actions [x,y,z,r,p,yaw,g], return (pick_idx, place_idx)
+    using:
+
+      pick  = first gripper transition 1 -> 0
+      place = first gripper transition 0 -> 1 after pick
+
+    Indices are 0-based into the 'actions' list.
     """
-    candidates = [
-        os.path.join(root, rel),
-        os.path.join(root, 'images', rel),
-        os.path.join(root, 'images', 'images', rel),
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
-    return None
+    if not actions:
+        return None, None
 
+    prev_g = actions[0][6]
+    pick_idx = None
+    place_idx = None
 
-def _resize_to_rgb(img_path: str) -> np.ndarray:
-    """Load image, convert to RGB, resize to 640x480 (W,H)."""
-    with Image.open(img_path) as im:
-        im = im.convert('RGB')
-        im = im.resize(RGB_SIZE, resample=Image.BILINEAR)
-        rgb = np.array(im, dtype=np.uint8)  # (H,W,3)? PIL is (W,H) on size; numpy array is (H,W,3)
-    return rgb
-
-
-def _synth_depth_like(rgb: np.ndarray, z_hint_m: float = 0.6) -> np.ndarray:
-    """
-    Create a simple synthetic depth map (H,W) in meters.
-    We use a constant plane by default; z_hint_m can be varied per sample.
-    """
-    H, W = rgb.shape[0], rgb.shape[1]
-    depth = np.ones((H, W), dtype=np.float32) * z_hint_m
-    return depth
-
-
-def _xyznorm_to_meters(x: float, y: float, z: float) -> Tuple[float, float, float]:
-    """
-    Map EB normalized [0..100] XYZ to CLIPort bounds in meters,
-    with optional swap/flip remaps applied before mapping.
-    """
-    # 1) optional remaps in 0..100 space
-    if SWAP_XY:
-        x, y = y, x
-    if FLIP_X:
-        x = 100.0 - x
-    if FLIP_Y:
-        y = 100.0 - y
-    if FLIP_Z:
-        z = 100.0 - z
-
-    # 2) scale to meters using BOUNDS
-    xr = BOUNDS[0, 1] - BOUNDS[0, 0]
-    yr = BOUNDS[1, 1] - BOUNDS[1, 0]
-    zr = BOUNDS[2, 1] - BOUNDS[2, 0]
-    xm = BOUNDS[0, 0] + (x / 100.0) * xr
-    ym = BOUNDS[1, 0] + (y / 100.0) * yr
-    zm = BOUNDS[2, 0] + (z / 100.0) * zr
-    return float(xm), float(ym), float(zm)
-
-
-def _euler_xyz_deg_to_quat_xyzw(roll_deg: float, pitch_deg: float, yaw_deg: float) -> Tuple[float,float,float,float]:
-    # If coordinate frames disagree, flipping yaw is a common fix
-    if NEGATE_YAW:
-        yaw_deg = -yaw_deg
-
-    r = np.deg2rad(roll_deg)
-    p = np.deg2rad(pitch_deg)
-    y = np.deg2rad(yaw_deg)
-    cr = np.cos(r/2.0); sr = np.sin(r/2.0)
-    cp = np.cos(p/2.0); sp = np.sin(p/2.0)
-    cy = np.cos(y/2.0); sy = np.sin(y/2.0)
-
-    qw = cr*cp*cy - sr*sp*sy
-    qx = sr*cp*cy - cr*sp*sy
-    qy = cr*sp*cy + sr*cp*sy
-    qz = cr*cp*sy + sr*sp*cy
-    return float(qx), float(qy), float(qz), float(qw)
-
-
-def _parse_action_str(a_str: str) -> List[int]:
-    # Actions are stored as strings like "[35, 57, 26, 6, 61, 36, 1]"
-    try:
-        # ast.literal_eval would be safest, but we avoid import; simple parse:
-        s = a_str.strip().lstrip('[').rstrip(']')
-        parts = [int(p.strip()) for p in s.split(',')]
-        if len(parts) != 7:
-            raise ValueError("Expected 7 numbers in action")
-        return parts
-    except Exception as e:
-        raise ValueError(f"Could not parse action string: {a_str}")
-
-
-def _derive_pick_place(actions_7d: List[List[int]]) -> Optional[Tuple[List[int], List[int]]]:
-    """
-    Given a list of EB 7D actions for a segment, return the first (pick, place) pair
-    using 1->0 (open->close) as pick, and next 0->1 as place. If not found, return None.
-    """
-    if not actions_7d:
-        return None
-    g_prev = actions_7d[0][6]
-    pick = None
-    place = None
-    for a in actions_7d[1:]:  # start from 2nd since we compare transitions
-        g = a[6]
-        if pick is None and (g_prev == 1 and g == 0):
-            pick = a
-        elif pick is not None and place is None and (g_prev == 0 and g == 1):
-            place = a
+    for i in range(1, len(actions)):
+        g = actions[i][6]
+        if pick_idx is None and prev_g == 1 and g == 0:
+            pick_idx = i
+        elif pick_idx is not None and place_idx is None and prev_g == 0 and g == 1:
+            place_idx = i
             break
-        g_prev = g
-    if pick is not None and place is not None:
-        return pick, place
-    return None
+        prev_g = g
+
+    if pick_idx is None or place_idx is None:
+        return None, None
+
+    return pick_idx, place_idx
 
 
-def _episode_to_cliport_entries(ep: EbEpisode,
-                                eb_root: str,
-                                keep_unlabeled: bool = False) -> List[Tuple[Dict[str, Any], Optional[Dict[str, Any]], float, Dict[str, Any]]]:
+def euler_xyz_to_quat_xyzw(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    """Euler XYZ -> quaternion [x,y,z,w]."""
+    cy = np.cos(yaw * 0.5)
+    sy = np.sin(yaw * 0.5)
+    cp = np.cos(pitch * 0.5)
+    sp = np.sin(pitch * 0.5)
+    cr = np.cos(roll * 0.5)
+    sr = np.sin(roll * 0.5)
+
+    qw = cr * cp * cy + sr * sp * sy
+    qx = sr * cp * cy - cr * sp * sy
+    qy = cr * sp * cy + sr * cp * sy
+    qz = cr * cp * sy - sr * sp * cy
+    return np.array([qx, qy, qz, qw], dtype=np.float32)
+
+
+def eb_grid_to_world_xyz(x: float, y: float, z: float) -> np.ndarray:
     """
-    Convert one EB episode into a list of CLIPort records (obs, act, reward, info).
+    Map EB [0..100] grid to CLIPort Ravens workspace.
 
-    Returns a list of tuples suitable for RavensDataset.add():
-      obs: {'color': [3x(H,W,3)], 'depth': [3x(H,W)]}
-      act: {'pose0': (xyz, quat), 'pose1': (xyz, quat)} or None
-      reward: float
-      info: {'lang_goal': instruction, 'episode_id': int, 'model': str, 'eval_set': str}
+    Typical CLIPort bounds:
+      x ∈ [0.25, 0.75]
+      y ∈ [-0.5, 0.5]
+      z ∈ [0, 0.28]
     """
-    results = []
-    for seg_idx, seg in enumerate(ep.segments):
-        # load the segment's input image as the observation
-        in_path = _safe_join(eb_root, seg.input_image_path)
-        if in_path is None:
-            # Skip segment if input image missing
+    xn = np.clip(x / 100.0, 0.0, 1.0)
+    yn = np.clip(y / 100.0, 0.0, 1.0)
+    zn = np.clip(z / 100.0, 0.0, 1.0)
+
+    x_min, x_max = 0.25, 0.75
+    y_min, y_max = -0.5, 0.5
+    z_min, z_max = 0.0, 0.28
+
+    x_world = x_min + (x_max - x_min) * xn
+    y_world = y_min + (y_max - y_min) * yn
+    z_world = z_min + (z_max - z_min) * zn
+
+    return np.array([x_world, y_world, z_world], dtype=np.float32)
+
+
+def load_and_resize_image(path: Path, out_h: int = 320, out_w: int = 160) -> np.ndarray:
+    img = Image.open(path).convert("RGB")
+    img = img.resize((out_w, out_h), resample=Image.BILINEAR)
+    return np.array(img, dtype=np.uint8)
+
+
+# ---------- main conversion ----------
+
+def convert_eb_to_cliport(
+    eb_json: Path,
+    image_root: Path,
+    out_root: Path,
+    task_name: str,
+    train_fraction: float,
+    img_h: int,
+    img_w: int,
+    only_success: bool,
+):
+    # Load JSON
+    with open(eb_json, "r") as f:
+        episodes = json.load(f)
+
+    print(f"Loaded {len(episodes)} EB episodes")
+
+    # First pass: determine which episodes have valid pick/place
+    valid_entries = []  # each: (ep_idx, pick_idx, place_idx)
+    for ep_idx, ep in enumerate(episodes):
+        success = float(ep.get("success", 0.0))
+        if only_success and success <= 0.0:
             continue
-        rgb = _resize_to_rgb(in_path)
-        # Simple synthetic depth plane; z_hint from mid of bounds (0.14m)
-        depth = _synth_depth_like(rgb, z_hint_m=float(BOUNDS[2].mean()))
 
-        # Duplicate to N_CAMS views (placeholder to satisfy CLIPort's get_fused_heightmap)
-        obs_color = [rgb.copy() for _ in range(N_CAMS)]
-        obs_depth = [depth.copy() for _ in range(N_CAMS)]
-
-        # pick/place from segment's low-level actions
-        actions_raw = [st.action for st in seg.steps]
-        pick_place = _derive_pick_place(actions_raw)
-
-        if pick_place is None and not keep_unlabeled:
-            # Skip unlabeled segment
+        traj = ep.get("trajectory", [])
+        if not traj:
             continue
 
-        act = None
-        if pick_place is not None:
-            pick7, place7 = pick_place
+        # Collect actions across steps
+        actions: List[List[int]] = []
+        for step in traj:
+            plan = step.get("executable_plan", None)
+            if not plan:
+                continue
+            a_str = plan.get("action", None)
+            if not a_str:
+                continue
+            try:
+                a = parse_action_str(a_str)
+            except Exception:
+                continue
+            if len(a) != 7:
+                continue
+            actions.append(a)
 
-            # Map normalized positions to meters
-            p0_xyz = _xyznorm_to_meters(pick7[0], pick7[1], pick7[2])
-            p1_xyz = _xyznorm_to_meters(place7[0], place7[1], place7[2])
+        if len(actions) < 2:
+            continue
 
-            # Convert Euler units to degrees (1 unit = 3 degrees), then to quat
-            def _to_deg(u): return float(u) * 3.0
-            p0_quat = _euler_xyz_deg_to_quat_xyzw(_to_deg(pick7[3]), _to_deg(pick7[4]), _to_deg(pick7[5]))
-            p1_quat = _euler_xyz_deg_to_quat_xyzw(_to_deg(place7[3]), _to_deg(place7[4]), _to_deg(place7[5]))
+        pick_idx, place_idx = find_pick_and_place(actions)
+        if pick_idx is None or place_idx is None:
+            continue
 
-            act = {'pose0': (p0_xyz, p0_quat),
-                   'pose1': (p1_xyz, p1_quat)}
+        valid_entries.append((ep_idx, pick_idx, place_idx))
 
-        # reward: use segment-level success if any step indicates success; else episode success
-        # (EB provides action_success per step; we consider a logical OR across steps)
-        reward = 1.0 if any(s.action_success >= 1.0 for s in seg.steps) else float(ep.success)
+    print(f"Episodes with valid pick/place: {len(valid_entries)}")
 
-        info = {
-            'lang_goal': ep.instruction,
-            'episode_id': ep.episode_id,
-            'model': ep.model_name,
-            'eval_set': ep.eval_set,
-            'segment_index': seg_idx
+    if not valid_entries:
+        print("No valid episodes found. Check success filter or gripper patterns.")
+        return
+
+    # Train/val split
+    n_total = len(valid_entries)
+    n_train = int(train_fraction * n_total)
+    train_entries = valid_entries[:n_train]
+    val_entries = valid_entries[n_train:]
+
+    print(f"Train episodes: {len(train_entries)}, Val episodes: {len(val_entries)}")
+
+    cfg = {
+        "dataset": {
+            "images": True,
+            "cache": False,
+            "augment": {"theta_sigma": 60},
+        }
+    }
+
+    train_path = out_root / f"{task_name}-train"
+    val_path   = out_root / f"{task_name}-val"
+
+    train_ds = RavensDataset(str(train_path), cfg, n_demos=0, augment=False)
+    val_ds   = RavensDataset(str(val_path),   cfg, n_demos=0, augment=False)
+
+    def build_episode(ep: Dict[str, Any], pick_idx: int, place_idx: int):
+        """Return (obs, act, reward, info) for a single CLIPort demo."""
+        instr = ep.get("instruction", "")
+        success = float(ep.get("success", 0.0))
+        episode_id = ep.get("episode_id", None)
+        traj = ep["trajectory"]
+
+        # Rebuild the full actions list indexed by time
+        actions: List[List[int]] = []
+        for step in traj:
+            plan = step.get("executable_plan", None)
+            if not plan:
+                actions.append(None)
+                continue
+            a_str = plan.get("action", None)
+            if not a_str:
+                actions.append(None)
+                continue
+            try:
+                a = parse_action_str(a_str)
+            except Exception:
+                actions.append(None)
+                continue
+            actions.append(a)
+
+        if pick_idx >= len(actions) or place_idx >= len(actions):
+            raise RuntimeError("pick_idx/place_idx out of range")
+
+        pick_action = actions[pick_idx]
+        place_action = actions[place_idx]
+        if pick_action is None or place_action is None:
+            raise RuntimeError("pick_action/place_action is None")
+
+        def eb_action_to_pose(action):
+            x, y, z, r, p, yw, g = action
+
+            xyz = eb_grid_to_world_xyz(x, y, z)
+
+            roll_deg  = r   * 3.0
+            pitch_deg = p   * 3.0
+            yaw_deg   = yw  * 3.0
+
+            roll  = np.deg2rad(roll_deg)
+            pitch = np.deg2rad(pitch_deg)
+            yaw   = np.deg2rad(yaw_deg)
+
+            quat = euler_xyz_to_quat_xyzw(roll, pitch, yaw)
+            return xyz, quat
+
+        pose0 = eb_action_to_pose(pick_action)
+        pose1 = eb_action_to_pose(place_action)
+
+        act = {
+            "pose0": pose0,
+            "pose1": pose1,
         }
 
-        obs = {'color': np.uint8(np.stack(obs_color, axis=0)),  # (N_CAMS,H,W,3)
-               'depth': np.float32(np.stack(obs_depth, axis=0))} # (N_CAMS,H,W)
+        # Observation image: BEFORE the pick action
+        obs_step = traj[pick_idx]   # same index into trajectory
+        img_rel = obs_step["input_image_path"]  # e.g. "images/.../step_k.png"
+        img_path = (image_root / img_rel).resolve()
+        if not img_path.exists():
+            raise FileNotFoundError(f"Image not found: {img_path}")
 
-        # RavensDataset.add() expects obs['color'] / obs['depth'] "per step" (we will save arrays later)
-        # Here we just return per-step obs in a format we can stack further.
-        results.append((obs, act, reward, info))
+        color = load_and_resize_image(img_path, out_h=img_h, out_w=img_w)
+        depth = np.zeros((img_h, img_w), dtype=np.float32)
 
-    return results
+        obs = {
+            "color": color,
+            "depth": depth,
+        }
 
+        reward = success  # not really used by CLIPort BC
 
-# ---------------- JSON parsing ----------------
+        info = {
+            "lang_goal": instr,
+            "eb_episode_id": episode_id,
+            "pick_idx": pick_idx,
+            "place_idx": place_idx,
+        }
 
-def _read_eb_json(json_path: str) -> List[EbEpisode]:
-    """
-    Parse eb-man_dataset_multi_step.json into structured objects.
-    The file groups episodes under different model_name/eval_set buckets.
-    """
-    with open(json_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+        return obs, act, reward, info
 
-    episodes: List[EbEpisode] = []
-
-    # The observed structure is a list of buckets, each having keys like:
-    # { "model_name": "...", "eval_set": "...", "episodes": [...] }  OR
-    # { "model_name": "...", "eval_set": "...", "episode_id": ..., "trajectory": [...] } etc.
-    # We'll support both "episodes" and a flat list fallback.
-    def _coerce_episode(d: Dict[str, Any]) -> Optional[EbEpisode]:
+    # Actually write train demos
+    seed = 0
+    added_train = 0
+    for ep_idx, pick_idx, place_idx in train_entries:
+        ep = episodes[ep_idx]
         try:
-            model_name = d.get('model_name', 'unknown')
-            eval_set = d.get('eval_set', 'unknown')
-            instruction = d.get('instruction') or d.get('task') or ""
-            episode_id = int(d.get('episode_id'))
-            success = float(d.get('success', 0.0))
+            obs, act, reward, info = build_episode(ep, pick_idx, place_idx)
+        except Exception as e:
+            print(f"[Train] Skipping ep_idx={ep_idx}: {e}")
+            continue
+        train_ds.add(seed, [(obs, act, reward, info)])
+        seed += 1
+        added_train += 1
 
-            segments: List[EbSegment] = []
-            # Source can be either "trajectory": [ ... segments ... ]
-            # or a list of dicts each with 'executable_plan' + 'input_image_path'
-            traj = d.get('trajectory', [])
-            for seg in traj:
-                steps = []
-                exec_plan = seg.get('executable_plan', [])
-                for s in exec_plan:
-                    a = s.get('action')
-                    if isinstance(a, str):
-                        a7 = _parse_action_str(a)
-                    elif isinstance(a, list) and len(a) == 7 and all(isinstance(x, (int, float)) for x in a):
-                        a7 = [int(x) for x in a]
-                    else:
-                        # Skip malformed
-                        continue
-                    steps.append(EbStep(
-                        img_path=s.get('img_path', ''),
-                        action=a7,
-                        action_success=float(s.get('action_success', 0.0))
-                    ))
-                ipath = seg.get('input_image_path')
-                if ipath and steps:
-                    segments.append(EbSegment(input_image_path=ipath, steps=steps))
+    # Val demos
+    seed = 0
+    added_val = 0
+    for ep_idx, pick_idx, place_idx in val_entries:
+        ep = episodes[ep_idx]
+        try:
+            obs, act, reward, info = build_episode(ep, pick_idx, place_idx)
+        except Exception as e:
+            print(f"[Val] Skipping ep_idx={ep_idx}: {e}")
+            continue
+        val_ds.add(seed, [(obs, act, reward, info)])
+        seed += 1
+        added_val += 1
 
-            if not segments:
-                return None
-
-            return EbEpisode(
-                model_name=model_name,
-                eval_set=eval_set,
-                episode_id=episode_id,
-                instruction=instruction,
-                success=success,
-                segments=segments
-            )
-        except Exception:
-            return None
-
-    # If the top-level is {'episodes':[...]} under multiple buckets
-    if isinstance(data, list):
-        # Could be a list of buckets
-        for item in data:
-            if isinstance(item, dict) and 'episodes' in item:
-                for ep in item['episodes']:
-                    epd = _coerce_episode(ep)
-                    if epd:
-                        episodes.append(epd)
-            elif isinstance(item, dict) and 'trajectory' in item:
-                epd = _coerce_episode(item)
-                if epd:
-                    episodes.append(epd)
-            else:
-                # Sometimes buckets nest more keys; try deeper
-                if isinstance(item, dict):
-                    for k, v in item.items():
-                        if isinstance(v, list):
-                            for ep in v:
-                                if isinstance(ep, dict) and 'trajectory' in ep:
-                                    epd = _coerce_episode(ep)
-                                    if epd:
-                                        episodes.append(epd)
-    elif isinstance(data, dict):
-        # Single bucket with 'episodes' or a single episode
-        if 'episodes' in data and isinstance(data['episodes'], list):
-            for ep in data['episodes']:
-                epd = _coerce_episode(ep)
-                if epd:
-                    episodes.append(epd)
-        elif 'trajectory' in data:
-            epd = _coerce_episode(data)
-            if epd:
-                episodes.append(epd)
-
-    return episodes
-
-
-# ---------------- Writer ----------------
-
-def _write_cliport_pickles(out_path: str,
-                           entries: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]], float, Dict[str, Any]]],
-                           start_index: int,
-                           seed: int) -> int:
-    """
-    Write CLIPort pickles for a list of entries (one EB segment -> one CLIPort sample).
-    Returns how many entries were written.
-    """
-    import pickle
-
-    if not entries:
-        return 0
-
-    # Build per-episode arrays
-    color_steps = []
-    depth_steps = []
-    action_steps = []
-    reward_steps = []
-    info_steps = []
-
-    for obs, act, rew, info in entries:
-        color_steps.append(obs['color'])   # (N_CAMS,H,W,3)
-        depth_steps.append(obs['depth'])   # (N_CAMS,H,W)
-        action_steps.append(act)           # dict or None
-        reward_steps.append(float(rew))
-        info_steps.append(info)
-
-    color_arr = np.uint8(np.stack(color_steps, axis=0))   # (T,N_CAMS,H,W,3)
-    depth_arr = np.float32(np.stack(depth_steps, axis=0)) # (T,N_CAMS,H,W)
-
-    # Prepare directories
-    for field in ('color', 'depth', 'action', 'reward', 'info'):
-        d = os.path.join(out_path, field)
-        os.makedirs(d, exist_ok=True)
-
-    # Filename pattern: '{episode:06d}-{seed}.pkl'
-    fname = f'{start_index:06d}-{seed}.pkl'
-    def _dump(obj, field):
-        with open(os.path.join(out_path, field, fname), 'wb') as f:
-            pickle.dump(obj, f)
-
-    _dump(color_arr, 'color')
-    _dump(depth_arr, 'depth')
-    _dump(action_steps, 'action')
-    _dump(reward_steps, 'reward')
-    _dump(info_steps, 'info')
-
-    return 1
-
-
-def _split_indices(n: int, train_ratio: float, val_ratio: float, test_ratio: float, rng: random.Random):
-    # Normalize ratios
-    s = train_ratio + val_ratio + test_ratio
-    train_ratio, val_ratio, test_ratio = train_ratio / s, val_ratio / s, test_ratio / s
-    idxs = list(range(n))
-    rng.shuffle(idxs)
-    n_tr = int(round(n * train_ratio))
-    n_va = int(round(n * val_ratio))
-    tr = idxs[:n_tr]
-    va = idxs[n_tr:n_tr+n_va]
-    te = idxs[n_tr+n_va:]
-    return tr, va, te
+    print(f"Added train demos: {added_train}")
+    print(f"Added val demos:   {added_val}")
+    print(f"Train dataset path: {train_path}")
+    print(f"Val dataset path:   {val_path}")
 
 
 def main():
-    import gc
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--eb_json", type=str, required=True,
+                        help="Path to EB JSON file (list of episodes).")
+    parser.add_argument("--image_root", type=str, required=True,
+                        help="Root folder that contains the 'images' directory.")
+    parser.add_argument("--out_root", type=str, required=True,
+                        help="Output root, usually $CLIPORT_ROOT/data.")
+    parser.add_argument("--task_name", type=str, default="eb-manip-single-step",
+                        help="Task name used for <task_name>-train / -val dirs.")
+    parser.add_argument("--train_fraction", type=float, default=0.9,
+                        help="Train / val split fraction.")
+    parser.add_argument("--img_h", type=int, default=320)
+    parser.add_argument("--img_w", type=int, default=160)
+    parser.add_argument("--only_success", type=int, default=0,
+                        help="1 => only episodes with success>0, 0 => all episodes.")
+    args = parser.parse_args()
 
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--eb_root', required=True, help='Root folder of EB-Man_trajectory_dataset (contains images/...)')
-    ap.add_argument('--json', required=True, help='Path to eb-man_dataset_multi_step.json')
-    ap.add_argument('--out_root', required=True, help='Where to write CLIPort dataset tree')
-    ap.add_argument('--task_name', default='eb-manipulation-seq', help='Task name prefix for CLIPort dataset')
-    ap.add_argument('--train_ratio', type=float, default=0.8)
-    ap.add_argument('--val_ratio', type=float, default=0.1)
-    ap.add_argument('--test_ratio', type=float, default=0.1)
-    ap.add_argument('--seed', type=int, default=13)
-    ap.add_argument('--keep_unlabeled', action='store_true', help='Keep segments without pick/place pair (act=None)')
-    ap.add_argument('--swap_xy', action='store_true', help='Swap x and y before mapping')
-    ap.add_argument('--flip_x', action='store_true', help='Flip x (x -> 100-x) before mapping')
-    ap.add_argument('--flip_y', action='store_true', help='Flip y (y -> 100-y) before mapping')
-    ap.add_argument('--flip_z', action='store_true', help='Flip z (z -> 100-z) before mapping')
-    ap.add_argument('--negate_yaw', action='store_true', help='Flip sign of yaw before quaternion')
-    args = ap.parse_args()
-    global SWAP_XY, FLIP_X, FLIP_Y, FLIP_Z, NEGATE_YAW
-    SWAP_XY   = args.swap_xy
-    FLIP_X    = args.flip_x
-    FLIP_Y    = args.flip_y
-    FLIP_Z    = args.flip_z
-    NEGATE_YAW= args.negate_yaw
-    rng = random.Random(args.seed)
-    np.random.seed(args.seed)
-   
-
-    # 1) Parse JSON into lightweight Python objects (no images yet)
-    episodes = _read_eb_json(args.json)
-    if not episodes:
-        print("No episodes parsed from JSON. Check the file structure.", file=sys.stderr)
-        return 2
-
-    # 2) Split by episode indices (so we never need all image arrays in RAM)
-    n_eps = len(episodes)
-    tr_idx, va_idx, te_idx = _split_indices(n_eps, args.train_ratio, args.val_ratio, args.test_ratio, rng)
-    splits = [('train', tr_idx), ('val', va_idx), ('test', te_idx)]
-
-    # 3) Convert + write ONE episode at a time (streaming)
-    total_written = 0
-    for split_name, idxs in splits:
-        split_dir = os.path.join(args.out_root, f'{args.task_name}-{split_name}')
-        os.makedirs(split_dir, exist_ok=True)
-
-        ep_counter = 0
-        for i, k in enumerate(idxs):
-            # Build obs/labels only for this episode
-            entries = _episode_to_cliport_entries(
-                episodes[k],
-                args.eb_root,
-                keep_unlabeled=args.keep_unlabeled
-            )
-            if not entries:
-                continue
-
-            # Deterministic seed per episode
-            seed = (args.seed * 100003 + k) % 1000000
-
-            # Write immediately, then free memory
-            n_written = _write_cliport_pickles(
-                split_dir,
-                entries,
-                start_index=ep_counter,
-                seed=seed
-            )
-            total_written += n_written
-            ep_counter += n_written
-
-            del entries
-            gc.collect()
-
-            # Optional progress: print every 10 episodes
-            if (i + 1) % 10 == 0:
-                print(f"[{split_name}] processed {i + 1}/{len(idxs)} episodes...", flush=True)
-
-        print(f"Wrote {ep_counter} episode(s) to {split_name}")
-
-    print(f"Done. Total CLIPort episodes written: {total_written}")
-    print(f"Dataset root: {args.out_root}")
-    print(f"Try training with: train.task={args.task_name}, train.data_dir={args.out_root}")
-    return 0
+    convert_eb_to_cliport(
+        eb_json=Path(args.eb_json),
+        image_root=Path(args.image_root),
+        out_root=Path(args.out_root),
+        task_name=args.task_name,
+        train_fraction=args.train_fraction,
+        img_h=args.img_h,
+        img_w=args.img_w,
+        only_success=bool(args.only_success),
+    )
 
 
-if __name__ == '__main__':
-    sys.exit(main())
+if __name__ == "__main__":
+    main()
 
 
-# python eb_to_cliport.py \
-#   --eb_root /home/ubuntu/cliport/data/embodiedbench/EB-Man_trajectory_dataset \
-#   --json /home/ubuntu/cliport/data/embodiedbench/EB-Man_trajectory_dataset/eb-man_dataset_multi_step.json \
-#   --out_root ./cliport_data \
-#   --task_name eb-manipulation-seq \
-#   --train_ratio 0.8 --val_ratio 0.1 --test_ratio 0.1 \
-#   --seed 14
-#   --swap_xy
-
-# python ./cliport/train.py \
+# python cliport/train.py \
+#   train.task=eb-manip-single-step \
 #   train.agent=cliport \
-#   train.task=eb-manipulation-seq \
-#   train.data_dir=/home/ubuntu/cliport/cliport_data \
 #   dataset.type=single \
+#   train.data_dir=./data \
 #   train.n_demos=500 \
-#   train.n_val=32 \
-#   train.n_steps=20000 \
-#   train.gpu=[0] \
-#   train.train_dir=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train \
-#   train.log=false
+#   train.n_steps=40000 \
+#   train.exp_folder=eb_runs \
+#   dataset.cache=False
 
-
-# export CLIPORT_ROOT=/home/ubuntu/cliport
-# export PYTHONPATH="$CLIPORT_ROOT:$PYTHONPATH"
-# ln -sfn /home/ubuntu/cliport/cliport_data/eb-manipulation-seq-test \
-#        /home/ubuntu/cliport/cliport_data/stack-block-pyramid-seq-seen-colors-test
-
-# python cliport/eval.py \
-#   mode=test \
-#   eval_task=stack-block-pyramid-seq-seen-colors \
-#   type=single \
-#   data_dir=/home/ubuntu/cliport/cliport_data \
-#   n_demos=138 \
-#   agent=cliport \
-#   model_path=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/checkpoints \
-#   train_config=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/.hydra/config.yaml \
-#   checkpoint_type=last \
-#   save_results=true update_results=true \
-#   save_path=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/eval \
-#   results_path=/home/ubuntu/cliport/cliport_quickstart/eb-manipulation-seq-cliport-n1000-train/eval
+# python cliport/train.py \
+#   train.task=eb-manip-single-step \
+#   train.agent=cliport \
+#   dataset.type=single \
+#   train.data_dir=/home/ubuntu/cliport/data \
+#   train.n_demos=500 \
+#   train.n_steps=40000 \
+#   train.exp_folder=eb_runs \
+#   dataset.cache=False

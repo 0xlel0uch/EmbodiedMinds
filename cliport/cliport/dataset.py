@@ -145,16 +145,41 @@ class RavensDataset(Dataset):
                 return episode, seed
 
     def get_image(self, obs, cam_config=None):
-        """Stack color and height images image."""
+        # --- EB-Manipulation fast path: pre-fused RGB image --- #
+        import numpy as np
 
-        # if self.use_goal_image:
-        #   colormap_g, heightmap_g = utils.get_fused_heightmap(goal, configs)
-        #   goal_image = self.concatenate_c_h(colormap_g, heightmap_g)
-        #   input_image = np.concatenate((input_image, goal_image), axis=2)
-        #   assert input_image.shape[2] == 12, input_image.shape
+        color = obs.get("color", None)
+        if isinstance(color, np.ndarray) and color.ndim == 3:
+            img = color
+            H, W, C = img.shape
+            # resize if needed
+            target_h, target_w, target_c = self.in_shape
+            if (H, W) != (target_h, target_w):
+                try:
+                    import cv2
+                    img = cv2.resize(img, (target_w, target_h))
+                except ImportError:
+                    # fallback: use PIL if cv2 is not installed
+                    from PIL import Image
+                    pil_img = Image.fromarray(img)
+                    pil_img = pil_img.resize((target_w, target_h), Image.BILINEAR)
+                    img = np.array(pil_img, dtype=np.uint8)
+
+            # make a dummy heightmap with zeros and stack to get 6 channels
+            hmap = np.zeros((target_h, target_w, 1), dtype=np.float32)
+            img6 = np.concatenate(
+                (img.astype(np.uint8), hmap, hmap, hmap),
+                axis=2
+            )
+            assert img6.shape == self.in_shape, img6.shape
+            return img6
+
+        # --- default Ravens path: fuse multi-camera RGB-D into heightmap --- #
+        from cliport.utils import utils
 
         if cam_config is None:
             cam_config = self.cam_config
+
 
         # Get color and height maps from RGB-D images.
         cmap, hmap = utils.get_fused_heightmap(
