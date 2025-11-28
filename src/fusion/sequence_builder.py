@@ -15,32 +15,46 @@ class MultimodalSequenceBuilder(nn.Module):
      current_objects]
     """
     
-    def __init__(self, token_dim: int = 256):
+    def __init__(
+        self,
+        token_dim: int = 256,
+        instr_dim: int = 768,
+        obj_dim: int = 256,
+        action_dim: int = 7,
+        vlm_vision_dim: Optional[int] = None,
+    ):
         super().__init__()
         self.token_dim = token_dim
         
         # Projection layers
-        self.instr_proj = nn.Linear(768, token_dim)  # BERT output (768) -> token_dim
-        self.action_proj = nn.Linear(7, token_dim)    # 7D action -> token_dim
-        # Object embeddings are already in token_dim, so we might not need projection
-        # But we'll add one for consistency and flexibility
-        self.obj_proj = nn.Linear(256, token_dim)     # object embeddings (256) -> token_dim
+        # Text encoder / VLM output (instr_dim) -> token_dim
+        self.instr_proj = nn.Linear(instr_dim, token_dim)
+        # Optional VLM vision embedding -> token_dim
+        self.vlm_vision_proj: Optional[nn.Linear] = (
+            nn.Linear(vlm_vision_dim, token_dim) if vlm_vision_dim is not None else None
+        )
+        # 7D action -> token_dim (or configurable action_dim)
+        self.action_proj = nn.Linear(action_dim, token_dim)
+        # Object embeddings (obj_dim) -> token_dim
+        self.obj_proj = nn.Linear(obj_dim, token_dim)
     
     def forward(
         self,
-        instr_embedding: torch.Tensor,  # (B, 768) from BERT
-        demo_object_embeddings: List[torch.Tensor],  # list of (B, num_obj, 256) per demo
-        demo_actions: Optional[List[torch.Tensor]] = None,  # list of (B, 7) per demo
-        current_object_embeddings: torch.Tensor = None,  # (B, num_obj, 256)
+        instr_embedding: torch.Tensor,  # (B, instr_dim)
+        demo_object_embeddings: List[torch.Tensor],  # list of (B, num_obj, obj_dim) per demo
+        current_object_embeddings: torch.Tensor = None,  # (B, num_obj, obj_dim)
+        demo_actions: Optional[List[torch.Tensor]] = None,  # list of (B, action_dim) per demo
+        vlm_vision_embedding: Optional[torch.Tensor] = None,  # (B, vlm_vision_dim)
     ) -> torch.Tensor:
         """
         Build multimodal sequence for transformer.
         
         Args:
-            instr_embedding: (B, 768) instruction embeddings from BERT
-            demo_object_embeddings: List of (B, num_obj, 256) tensors, one per demo
-            demo_actions: Optional list of (B, 7) action tensors, one per demo
-            current_object_embeddings: (B, num_obj, 256) current scene objects
+            instr_embedding: (B, instr_dim) instruction embeddings
+            demo_object_embeddings: List of (B, num_obj, obj_dim) tensors, one per demo
+            current_object_embeddings: (B, num_obj, obj_dim) current scene objects
+            demo_actions: Optional list of (B, action_dim) action tensors, one per demo
+            vlm_vision_embedding: Optional (B, vlm_vision_dim) global image embeddings
             
         Returns:
             (B, max_seq_len, token_dim) tensor ready for transformer
@@ -57,6 +71,15 @@ class MultimodalSequenceBuilder(nn.Module):
             # 1. Instruction token
             instr_token = self.instr_proj(instr_embedding[b:b+1])  # (1, token_dim)
             seq.append(instr_token)
+
+            # 1b. Optional global VLM vision token (e.g., from current RGB frame)
+            if (
+                vlm_vision_embedding is not None
+                and self.vlm_vision_proj is not None
+                and vlm_vision_embedding.size(0) == B
+            ):
+                vision_token = self.vlm_vision_proj(vlm_vision_embedding[b:b+1])
+                seq.append(vision_token)
             
             # 2. Demo sequences
             num_demos = len(demo_object_embeddings) if demo_object_embeddings else 0

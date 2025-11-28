@@ -2,6 +2,7 @@ from transformers import BertTokenizer, BertModel
 import torch.nn as nn
 import torch
 import os
+import glob
 from torch import optim
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -60,6 +61,7 @@ def train(
     early_stopping_patience=5,
     early_stopping_min_delta=0.001,
     early_stopping_enabled=True,
+    vlm_adapter: str = None,
 ):
     """
     Train the agent model with early stopping.
@@ -86,27 +88,37 @@ def train(
     patience_counter = 0
     best_epoch = 0
 
-    # Build dataloaders with 3D preprocessing
+    # Build dataloaders with 3D preprocessing and proper 80/10/10 splits
     train_dl = build_dataloader(
         batch_size=batch_size, 
         debug=False, 
         data_root=data_root, 
         num_workers=0,  # Set to 0 to avoid multiprocessing issues with models
         use_3d_preprocessing=use_3d_preprocessing,
-        device=device
+        device=device,
+        split="train",  # 80% of data
+        seed=42
     )
     val_dl = build_dataloader(
         batch_size=batch_size, 
-        debug=True, 
+        debug=False,  # Use full validation set, not debug mode
         data_root=data_root, 
         num_workers=0,
         use_3d_preprocessing=use_3d_preprocessing,
-        device=device
+        device=device,
+        split="val",  # 10% of data
+        seed=42
     )
 
     # model
     bins = [101,101,101,121,121,121,2]
-    model = AgentModel(token_dim=256, out_dim=512, bins=bins, device=device).to(device)
+    model = AgentModel(
+        token_dim=256,
+        out_dim=512,
+        bins=bins,
+        device=device,
+        vlm_adapter_name=vlm_adapter,
+    ).to(device)
 
     # optimizer: only trainable params (projections + policy + heads)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
@@ -125,13 +137,15 @@ def train(
                 demo_3d_objects = batch['demo_3d_objects']
                 current_3d_objects = batch['current_3d_objects']
                 demo_actions = batch.get('demo_actions', None)
+                current_images = batch.get('current_images', None)
                 targets = batch['targets'].to(device)
-                
+
                 logits = model.forward(
                     instructions,
                     demo_3d_objects,
                     current_3d_objects,
-                    demo_actions
+                    demo_actions,
+                    current_images=current_images,
                 )
             else:
                 # Old format (for backward compatibility)
@@ -141,7 +155,7 @@ def train(
                 targets = targets.to(device)
                 # Note: Old format won't work with new AgentModel - would need old model
                 raise NotImplementedError("Old format not supported with new AgentModel")
-            
+
             loss = model.heads.loss(logits, targets)
             optimizer.zero_grad()
             loss.backward()
@@ -165,13 +179,15 @@ def train(
                     demo_3d_objects = batch['demo_3d_objects']
                     current_3d_objects = batch['current_3d_objects']
                     demo_actions = batch.get('demo_actions', None)
+                    current_images = batch.get('current_images', None)
                     targets = batch['targets'].to(device)
                     
                     logits = model.forward(
                         instructions,
                         demo_3d_objects,
                         current_3d_objects,
-                        demo_actions
+                        demo_actions,
+                        current_images=current_images,
                     )
                 else:
                     raise NotImplementedError("Old format not supported")
@@ -224,8 +240,6 @@ def train(
                 if "file write failed" in str(e) or "disk" in str(e).lower():
                     print(f"  ⚠️  Disk full! Cannot save checkpoint. Free up space and try again.")
                     # Try to delete old checkpoints
-                    import os
-                    import glob
                     old_checkpoints = sorted(glob.glob("checkpoints/agent_epoch*.pt"), key=os.path.getmtime)[:-3]  # Keep last 3
                     for old_ckpt in old_checkpoints:
                         try:
@@ -242,8 +256,6 @@ def train(
             torch.save(ckpt, f"checkpoints/agent_epoch{epoch}.pt")
             
             # Clean up old checkpoints (keep only last 3 + best)
-            import os
-            import glob
             epoch_checkpoints = sorted(glob.glob("checkpoints/agent_epoch*.pt"), key=os.path.getmtime)
             if len(epoch_checkpoints) > 3:
                 for old_ckpt in epoch_checkpoints[:-3]:
@@ -307,24 +319,49 @@ def train(
 if __name__ == "__main__":
     # simple CLI-friendly entry
     import argparse
+
     p = argparse.ArgumentParser()
     p.add_argument("--data-root", default=None)
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--epochs", type=int, default=3)
     p.add_argument("--lr", type=float, default=1e-4)
-    p.add_argument("--early-stopping-patience", type=int, default=5,
-                   help="Number of epochs to wait before early stopping")
-    p.add_argument("--early-stopping-min-delta", type=float, default=0.001,
-                   help="Minimum change to qualify as improvement")
-    p.add_argument("--no-early-stopping", action="store_true",
-                   help="Disable early stopping")
+    p.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=5,
+        help="Number of epochs to wait before early stopping",
+    )
+    p.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=0.001,
+        help="Minimum change to qualify as improvement",
+    )
+    p.add_argument(
+        "--no-early-stopping",
+        action="store_true",
+        help="Disable early stopping",
+    )
+    p.add_argument(
+        "--vlm-adapter",
+        type=str,
+        default=None,
+        help=(
+            "Optional VLM adapter name to use instead of the legacy BERT text "
+            "encoder. Examples: llama-3.2-11b-vision-ins, internvl-2.5-8b, "
+            "internvl-3-8b, qwen2-vl-7b-ins, qwen2.5-vl-7b-ins, ovis2-16b, "
+            "gemma-3-12b-it."
+        ),
+    )
+
     args = p.parse_args()
     train(
-        data_root=args.data_root, 
-        batch_size=args.batch_size, 
-        epochs=args.epochs, 
+        data_root=args.data_root,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
         lr=args.lr,
         early_stopping_patience=args.early_stopping_patience,
         early_stopping_min_delta=args.early_stopping_min_delta,
-        early_stopping_enabled=not args.no_early_stopping
+        early_stopping_enabled=not args.no_early_stopping,
+        vlm_adapter=args.vlm_adapter,
     )

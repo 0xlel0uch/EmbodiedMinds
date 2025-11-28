@@ -8,6 +8,7 @@ from src.encoders.object_encoder import ObjectEncoder
 from src.fusion.sequence_builder import MultimodalSequenceBuilder
 from src.policy.policy_transformer import PolicyTransformer
 from src.heads.output_heads import OutputHeads
+from src.vlm_adapters import build_vlm_adapter
 
 
 class AgentModel(nn.Module):
@@ -23,14 +24,29 @@ class AgentModel(nn.Module):
         text_model_name: str = "bert-base-uncased",
         vision_model_name: str = "openai/clip-vit-base-patch32",
         device: str = "cpu",
+        vlm_adapter_name: Optional[str] = None,
     ):
         super().__init__()
         if bins is None:
             bins = [101, 101, 101, 121, 121, 121, 2]
         
         self.device = device
+
+        # VLM adapter (optional). If provided, this replaces the legacy
+        # TextEncoder for instruction embeddings.
+        self.vlm = None
+        if vlm_adapter_name is not None:
+            self.vlm = build_vlm_adapter(vlm_adapter_name, device=device)
+            instr_dim = int(self.vlm.text_hidden_size)
+            # We choose image embeddings to live in the same hidden size space when used.
+            vlm_vision_dim: Optional[int] = instr_dim
+        else:
+            instr_dim = 768  # BERT default
+            vlm_vision_dim = None
         
-        # Frozen encoders
+        # Frozen encoders (legacy baseline)
+        # These are still constructed so existing configs keep working. When a
+        # VLM adapter is used we rely on self.vlm.encode_text() instead.
         self.text_enc = TextEncoder(model_name=text_model_name, device=device)
         self.vision_enc = VisionEncoder(model_name=vision_model_name, device=device)
         
@@ -38,7 +54,13 @@ class AgentModel(nn.Module):
         self.object_enc = ObjectEncoder(embedding_dim=256)
         
         # Sequence builder (trainable)
-        self.seq_builder = MultimodalSequenceBuilder(token_dim=token_dim)
+        self.seq_builder = MultimodalSequenceBuilder(
+            token_dim=token_dim,
+            instr_dim=instr_dim,
+            obj_dim=256,
+            action_dim=7,
+            vlm_vision_dim=vlm_vision_dim,
+        )
         
         # Policy & heads
         self.policy = PolicyTransformer(token_dim=token_dim, out_dim=out_dim)
@@ -59,6 +81,7 @@ class AgentModel(nn.Module):
         demo_3d_objects: List[List[torch.Tensor]],
         current_3d_objects: List[torch.Tensor],
         demo_actions: Optional[List[torch.Tensor]] = None,
+        current_images: Optional[List[torch.Tensor]] = None,
     ):
         """
         Forward pass through the model.
@@ -75,10 +98,31 @@ class AgentModel(nn.Module):
         Returns:
             list of logits from output heads, each of shape (B, bins_i)
         """
-        # Encode instruction
-        instr_embed = self.text_enc.encode(instr_texts)  # (B, 768)
+        # Encode instruction (and possibly image) via VLM or legacy encoder.
+        vlm_vision_embed = None
+        if self.vlm is not None:
+            # Some adapters (e.g., InternVLChatAdapter) require both text and images.
+            if hasattr(self.vlm, "supports_text_only") and not self.vlm.supports_text_only:
+                if current_images is None:
+                    raise ValueError(
+                        "Current RGB images are required for this VLM adapter but were not provided."
+                    )
+                instr_embed = self.vlm.encode_multimodal(instr_texts, current_images)
+            else:
+                instr_embed = self.vlm.encode_text(instr_texts)
+                # Optional: encode current RGB image via VLM vision tower if available
+                if current_images is not None:
+                    try:
+                        vlm_vision_embed = self.vlm.encode_image(current_images)
+                    except NotImplementedError:
+                        vlm_vision_embed = None
+        else:
+            instr_embed = self.text_enc.encode(instr_texts)  # (B, 768)
+
         # Ensure instruction embedding is on correct device
         instr_embed = instr_embed.to(self.device)
+        if vlm_vision_embed is not None:
+            vlm_vision_embed = vlm_vision_embed.to(self.device)
         
         # Encode 3D objects
         demo_obj_embeds = []
@@ -105,10 +149,11 @@ class AgentModel(nn.Module):
         
         # Build sequence
         tokens = self.seq_builder(
-            instr_embed,
-            demo_obj_embeds,
-            demo_actions_device if demo_actions_device else None,
-            current_obj_embeds,
+            instr_embedding=instr_embed,
+            demo_object_embeddings=demo_obj_embeds,
+            current_object_embeddings=current_obj_embeds,
+            demo_actions=demo_actions_device if demo_actions_device else None,
+            vlm_vision_embedding=vlm_vision_embed,
         )  # (B, seq_len, token_dim)
         
         # Policy reasoning

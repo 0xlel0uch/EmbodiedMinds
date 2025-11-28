@@ -49,18 +49,21 @@ def resolve_data_root():
 class EmbodiedDataset(Dataset):
     """
     Dataset loader for EB-Man trajectory dataset.
-    Loads from JSON files and image directories.
+    Loads from JSON files and image directories with proper train/val/test splits.
     """
-    def __init__(self, data_root=None, debug=False, dataset_type="single_step"):
+    def __init__(self, data_root=None, debug=False, dataset_type="single_step", split="train", seed=42):
         """
         Args:
             data_root: Root directory containing EB-Man_trajectory_dataset
             debug: If True, use smaller subset
             dataset_type: "single_step" or "multi_step"
+            split: "train", "val", or "test" (80/10/10 split)
+            seed: Random seed for reproducible splits
         """
         self.data_root = Path(data_root) if data_root else resolve_data_root()
         self.debug = debug
         self.dataset_type = dataset_type
+        self.split = split
         
         # Find dataset directory
         dataset_dir = self.data_root / "EB-Man_trajectory_dataset"
@@ -77,14 +80,36 @@ class EmbodiedDataset(Dataset):
         
         print(f"Loading dataset from: {json_file}")
         with open(json_file, 'r') as f:
-            self.data = json.load(f)
+            all_data = json.load(f)
+        
+        # Create reproducible train/val/test split (80/10/10)
+        np.random.seed(seed)
+        indices = np.random.permutation(len(all_data))
+        
+        n_train = int(0.8 * len(all_data))
+        n_val = int(0.1 * len(all_data))
+        
+        train_indices = indices[:n_train]
+        val_indices = indices[n_train:n_train + n_val]
+        test_indices = indices[n_train + n_val:]
+        
+        if split == "train":
+            selected_indices = train_indices
+        elif split == "val":
+            selected_indices = val_indices
+        elif split == "test":
+            selected_indices = test_indices
+        else:
+            raise ValueError(f"Invalid split: {split}. Must be 'train', 'val', or 'test'")
+        
+        self.data = [all_data[i] for i in selected_indices]
         
         # Filter and limit for debug
         if debug:
             self.data = self.data[:20]
         
         self.dataset_dir = dataset_dir
-        print(f"Loaded {len(self.data)} examples")
+        print(f"Loaded {len(self.data)} examples for {split} split")
 
     def __len__(self):
         return len(self.data)
@@ -324,6 +349,9 @@ def collate_fn_3d(batch, device="cpu"):
     current_3d_objects_list = []
     demo_actions_list = []
     targets = []
+    # Raw RGB images for optional VLM vision encoding
+    demo_images_batch: List[torch.Tensor] = []
+    current_images_batch: List[torch.Tensor] = []
     
     for b in batch:
         instructions.append(b["instruction"])
@@ -333,6 +361,8 @@ def collate_fn_3d(batch, device="cpu"):
         if "demo_images" in b and b["demo_images"] is not None:
             demo_images = b["demo_images"]  # (num_demos, 3, H, W)
             num_demos = demo_images.shape[0]
+            # Keep raw demo images for potential VLM vision usage
+            demo_images_batch.append(demo_images)
             
             for demo_idx in range(num_demos):
                 # Average frames if needed, or take first frame
@@ -354,14 +384,16 @@ def collate_fn_3d(batch, device="cpu"):
                 obj_3d = create_3d_object_representations(objects, depth_map, h, w)
                 demo_3d_objs_per_example.append(obj_3d)
         else:
-            # No demos - add empty list
+            # No demos - add empty list and empty image tensor
             demo_3d_objs_per_example = []
+            demo_images_batch.append(torch.zeros(0, 3, 224, 224, dtype=torch.float32))
         
         demo_3d_objects_list.append(demo_3d_objs_per_example)
         
         # Process current image
         if "current_image" in b and b["current_image"] is not None:
             current_img = b["current_image"]  # (3, H, W)
+            current_images_batch.append(current_img)
             
             # Convert to numpy RGB format
             if current_img.max() <= 1.0:
@@ -379,8 +411,9 @@ def collate_fn_3d(batch, device="cpu"):
             obj_3d = create_3d_object_representations(objects, depth_map, h, w)
             current_3d_objects_list.append(obj_3d)
         else:
-            # No current image - add empty tensor
+            # No current image - add empty tensors
             current_3d_objects_list.append(torch.zeros((0, 7), dtype=torch.float32))
+            current_images_batch.append(torch.zeros(3, 224, 224, dtype=torch.float32))
         
         # Extract demo actions (last valid action from each demo)
         demo_actions_per_example = []
@@ -431,12 +464,15 @@ def collate_fn_3d(batch, device="cpu"):
         'current_3d_objects': current_3d_objects_list,
         'demo_actions': demo_actions_by_demo if demo_actions_by_demo else None,
         'targets': torch.tensor(targets, dtype=torch.long),
+        # Raw images, as lists of tensors, for optional VLM vision encoding
+        'demo_images': demo_images_batch,
+        'current_images': current_images_batch,
     }
 
 
-def build_dataloader(batch_size=4, debug=False, data_root=None, num_workers=0, use_3d_preprocessing=True, device="cpu"):
+def build_dataloader(batch_size=4, debug=False, data_root=None, num_workers=0, use_3d_preprocessing=True, device="cpu", split="train", seed=42):
     """
-    Build dataloader with optional 3D preprocessing.
+    Build dataloader with optional 3D preprocessing and proper data splits.
     
     Args:
         batch_size: Batch size
@@ -445,12 +481,16 @@ def build_dataloader(batch_size=4, debug=False, data_root=None, num_workers=0, u
         num_workers: Number of worker processes
         use_3d_preprocessing: If True, use collate_fn_3d for 3D preprocessing
         device: Device for preprocessing (if use_3d_preprocessing=True)
+        split: "train", "val", or "test" (80/10/10 split)
+        seed: Random seed for reproducible splits
     """
-    ds = EmbodiedDataset(data_root=data_root, debug=debug)
+    ds = EmbodiedDataset(data_root=data_root, debug=debug, split=split, seed=seed)
+    # Shuffle only for training
+    shuffle = (split == "train")
     collate_fn = collate_fn_3d if use_3d_preprocessing else None
     if collate_fn is not None:
         # Create a lambda that passes device
         collate_fn_with_device = lambda batch: collate_fn_3d(batch, device=device)
-        return DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, collate_fn=collate_fn_with_device)
+        return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, collate_fn=collate_fn_with_device)
     else:
-        return DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+        return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)

@@ -10,7 +10,9 @@ from pathlib import Path
 import json
 
 from src.utils.task_metrics import TaskMetricsTracker, categorize_error
-from data_loader import EmbodiedDataset
+from src.preprocessing.object_detection import ObjectDetector
+from src.preprocessing.depth_estimation import DepthEstimator
+from data_loader import EmbodiedDataset, collate_fn_3d
 
 
 class TrajectoryEvaluator:
@@ -94,13 +96,15 @@ class TrajectoryEvaluator:
             demo_3d_objects = processed_batch['demo_3d_objects']
             current_3d_objects = processed_batch['current_3d_objects']
             demo_actions_list = processed_batch.get('demo_actions', None)
+            current_images = processed_batch.get('current_images', None)
             
-            # Run model
+            # Run model (single example batch)
             logits = self.model.forward(
                 instructions,
                 demo_3d_objects,
                 current_3d_objects,
-                demo_actions_list
+                demo_actions_list,
+                current_images=current_images,
             )
             
             # Get predictions

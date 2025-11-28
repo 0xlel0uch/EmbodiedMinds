@@ -54,14 +54,16 @@ def main():
     model.to(device)
     model.eval()
     
-    # Load dataset
-    print(f"Loading dataset from: {args.data_root}")
+    # Load dataset (use test split for evaluation)
+    print(f"Loading dataset from: {args.data_root} (test split)")
     dataset = EmbodiedDataset(
         data_root=args.data_root,
         debug=False,
-        dataset_type=args.dataset_type
+        dataset_type=args.dataset_type,
+        split="test",  # Use held-out test set (10% of data)
+        seed=42
     )
-    print(f"Dataset loaded: {len(dataset)} episodes")
+    print(f"Dataset loaded: {len(dataset)} test episodes")
     
     # Initialize metrics tracker
     metrics_tracker = TaskMetricsTracker(
